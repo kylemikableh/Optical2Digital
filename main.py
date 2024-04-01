@@ -7,12 +7,12 @@ INPUT_FOLDER = "./input/DolbyStereo/"
 FRAMES_PER_SECOND = 24
 CUTTOFF_FREQUENCY = 16000
 S_INT16_MAX = 32767
-STEREO_TRACKS = False
+STEREO_TRACKS = True
 
 DEBUG_SHOW = True
 
 # Pull images files
-filenames = opt.get_imgs_range(INPUT_FOLDER, 1000, 1324)
+filenames = opt.get_imgs_range(INPUT_FOLDER, 0, 11600)
 duration_in_seconds = len(filenames) / FRAMES_PER_SECOND
 img_height = 0
 
@@ -49,8 +49,8 @@ for img in images:
         left_mean, right_mean = opt.process_stereo_mean(left_img, right_img)
         mean_tuples = (left_mean, right_mean)
         mean_values_arr.append(mean_tuples)
-        cv2.imwrite(f"output\\output{ img_count }_left.jpeg", left_img)
-        cv2.imwrite(f"output\\output{ img_count }_right.jpeg", right_img)
+        # cv2.imwrite(f"output\\output{ img_count }_left.jpeg", left_img)
+        # cv2.imwrite(f"output\\output{ img_count }_right.jpeg", right_img)
     else:
         mean = opt.process_mono_mean(img)
         mean_values_arr.append(mean)
@@ -61,4 +61,7 @@ for img in images:
 mean_values_arr = mean_values_arr[::-1]
 print(mean_values_arr)
 
-opt.write_wav_mono(mean_values_arr, img_height, duration_in_seconds, FRAMES_PER_SECOND, "outputnew.wav")
+if not STEREO_TRACKS:
+    opt.write_wav_mono(mean_values_arr, img_height, duration_in_seconds, FRAMES_PER_SECOND, "outputnew.wav")
+else:
+    opt.write_wav_stereo(mean_values_arr, img_height, duration_in_seconds, FRAMES_PER_SECOND, "outputnew.wav")

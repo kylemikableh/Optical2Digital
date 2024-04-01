@@ -39,8 +39,8 @@ def get_left_right_imgs(img, center_pos: int):
     Get the left/right audio tracks as seperate images
     '''
     height,width = img.shape
-    img_left = img[0:height,0:center_pos]
-    img_right = img[0:height,center_pos:width]
+    img_right = img[0:height,0:center_pos]
+    img_left = img[0:height,center_pos:width]
     return (img_left, img_right)
 
 def process_mono_mean(img):
@@ -84,6 +84,37 @@ def write_wav_mono(mono_samples, img_height, duration, fps:int, raw_output_file:
         for sample in mono_samples:
              for i in range(0,img_height):
                 # print(sample[i])
-                packed_sample = struct.pack('<h', sample[i])
+                data_block = sample[i]
+                packed_sample = struct.pack('<h', data_block)
                 data += packed_sample
         output_file.writeframesraw(data)
+
+def write_wav_stereo(samples, img_height, duration, fps:int, raw_output_file: str):
+    '''
+    Write the wave mono samples
+    '''
+    sample_rate = img_height * fps # Currently making the sample rate the height of each image times the amount of frames in a second
+    print(f"Sample rate: { sample_rate }")
+    num_channels = 2 # STEREO
+    num_frames = int(sample_rate * duration) # amount of frames in a second
+
+    with wave.open(raw_output_file, 'wb') as output_file:
+        output_file.setnchannels(num_channels)
+        output_file.setsampwidth(BIT_DEPTH // 8)
+        output_file.setframerate(sample_rate)
+        output_file.setnframes(num_frames)
+        output_file.setcomptype('NONE', 'Not Compressed')
+        
+        data = b''
+        for frame in range(0, len(samples)):
+            sample_left,sample_right = samples[frame]
+            print(frame)
+            for i in range(0,img_height):
+                data_block_left = sample_left[i]
+                data_block_right = sample_right[i]
+                packed_sample_left = struct.pack('<h', data_block_left)
+                data += packed_sample_left
+                packed_sample_right = struct.pack('<h', data_block_right)
+                data += packed_sample_right
+            output_file.writeframesraw(data)
+            data = b''
