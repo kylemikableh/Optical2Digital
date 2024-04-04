@@ -36,7 +36,7 @@ def disp_img_with_scale(img, scale_factor: float):
 
 def get_left_right_imgs(img, center_pos: int):
     '''
-    Get the left/right audio tracks as seperate images
+    Get the left/right audio tracks as seperate images. Center pos on image
     '''
     height,width = img.shape
     img_right = img[0:height,0:center_pos]

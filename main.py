@@ -12,14 +12,14 @@ STEREO_TRACKS = True
 DEBUG_SHOW = True
 
 # Pull images files
-filenames = opt.get_imgs_range(INPUT_FOLDER, 0, 11600)
+filenames = opt.get_imgs_range(INPUT_FOLDER, 0, 11600) # 11600 (9000,10000)
 duration_in_seconds = len(filenames) / FRAMES_PER_SECOND
 img_height = 0
 
 images = []
 for filename in filenames:
     img = cv2.imread(INPUT_FOLDER + filename, cv2.IMREAD_GRAYSCALE) # Read in image as greyscale
-    img = opt.crop_img_left_right(img, 100, 85)
+    img = opt.crop_img_left_right(img, 115, 115) #100, 85
     
     # if DEBUG_SHOW:
     #     opt.disp_img_with_scale(img, 0.5)
@@ -45,12 +45,13 @@ img_count = 0
 for img in images:
 
     if STEREO_TRACKS:
-        left_img,right_img = opt.get_left_right_imgs(img, 115)
+        left_img,right_img = opt.get_left_right_imgs(img, 100)
         left_mean, right_mean = opt.process_stereo_mean(left_img, right_img)
         mean_tuples = (left_mean, right_mean)
         mean_values_arr.append(mean_tuples)
-        # cv2.imwrite(f"output\\output{ img_count }_left.jpeg", left_img)
-        # cv2.imwrite(f"output\\output{ img_count }_right.jpeg", right_img)
+        cv2.imwrite(f"output\\output{ img_count }_left.jpeg", left_img)
+        cv2.imwrite(f"output\\output{ img_count }_right.jpeg", right_img)
+        cv2.imwrite(f"output\\output{ img_count }.jpeg", img)
     else:
         mean = opt.process_mono_mean(img)
         mean_values_arr.append(mean)
