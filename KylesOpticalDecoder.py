@@ -1,5 +1,5 @@
 """
-KylesSVADecoder - Optical Film Soundtrack to WAV Extractor
+Kyle's Optical Decoder - Optical Film Soundtrack to WAV Extractor
 
 Extracts audio from scanned motion picture film optical soundtracks (variable-area):
   1. Load scanned frame images
