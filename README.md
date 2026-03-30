@@ -5,7 +5,7 @@ to use to convert the audio. However, the codebase is in C++, and it is difficul
 Optical to Digital conversion tool, written in python, that can convert optical audio of all shapes and sizes (possibly other formats too like Dolby-Digital or SDDS) and Dolby A/SR easily and effectivly.
 Also, another important goal is that anyone can understand how the audio conversions work and can extend the functionality into their own projects too.
 
-For now, the focus is proof of concept to get acceptable audio out of images, that can then be extended into a full tool.
+Goal is for a modern tool for decoding the optical audio.
 
 ## Useful Links
 * Sound-on-film https://en.wikipedia.org/wiki/Sound-on-film
@@ -14,11 +14,9 @@ For now, the focus is proof of concept to get acceptable audio out of images, th
 * Dolby Digital https://en.wikipedia.org/wiki/Dolby_Digital
 
 
-## Setup (Windows)
-1) Make a python environment
-2) Activate `.\venv\Scripts\Activate.ps1`
-3) Install dependencies `pip install -r requirements.txt`
-4) Start noteboox `jupyter notebook`
+## Kyle's Optical Decoder
+Python CLI tool that can extract film optical audio
+
 
 ### Contributors
 * Kyle Mikolajczyk
