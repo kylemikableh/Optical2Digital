@@ -81,6 +81,10 @@ def parse_args():
         help="Low-pass filter cutoff in Hz (anti-aliasing)",
     )
     parser.add_argument(
+        "--overlap", type=float, default=0.25,
+        help="Fraction of frame height to search for overlap between consecutive frames (0 = disabled, 0.25 = 25%%)",
+    )
+    parser.add_argument(
         "--rotate", type=int, default=0, choices=[0, 90, 180, 270],
         help="Rotate cropped image by this many degrees clockwise before extraction",
     )
@@ -143,6 +147,68 @@ def extract_scanline_audio(corrected_img):
     The mean brightness across the row gives the instantaneous amplitude [0,1].
     """
     return np.mean(corrected_img, axis=1)
+
+
+# ---------------------------------------------------------------------------
+# Overlap stitching
+# ---------------------------------------------------------------------------
+
+def find_best_overlap(prev_samples, curr_samples, max_overlap):
+    """Find the overlap offset that best aligns the end of prev with the start of curr.
+
+    Slides the two waveforms against each other and returns the offset (in samples)
+    that minimizes the mean absolute difference — the same approach AEO-Light uses.
+    """
+    search_range = min(max_overlap, len(prev_samples) // 2, len(curr_samples) // 2)
+    if search_range < 2:
+        return 0
+
+    best_offset = 0
+    best_error = float("inf")
+
+    for offset in range(1, search_range):
+        error = np.mean(np.abs(prev_samples[-offset:] - curr_samples[:offset]))
+        if error < best_error:
+            best_error = error
+            best_offset = offset
+
+    return best_offset
+
+
+def stitch_with_overlap(frame_audio_list, max_overlap_frac):
+    """Stitch frame audio arrays with overlap detection and cross-fade blending.
+
+    For each consecutive pair of frames:
+      1. Find the best overlap alignment (minimum absolute difference)
+      2. Cross-fade in the overlap region to avoid clicks
+      3. Concatenate the non-overlapping portions
+    """
+    if not frame_audio_list:
+        return np.array([], dtype=np.float64)
+    if len(frame_audio_list) == 1 or max_overlap_frac <= 0:
+        return np.concatenate(frame_audio_list)
+
+    frame_len = len(frame_audio_list[0])
+    max_overlap = int(frame_len * max_overlap_frac)
+
+    result = frame_audio_list[0].copy()
+
+    for i in range(1, len(frame_audio_list)):
+        curr = frame_audio_list[i]
+        overlap = find_best_overlap(result, curr, max_overlap)
+
+        if overlap > 0:
+            # Cross-fade: linear blend in the overlap region
+            fade_out = np.linspace(1.0, 0.0, overlap)
+            fade_in = np.linspace(0.0, 1.0, overlap)
+            blended = result[-overlap:] * fade_out + curr[:overlap] * fade_in
+
+            # Replace the tail of result with the blended region, then append the rest
+            result = np.concatenate([result[:-overlap], blended, curr[overlap:]])
+        else:
+            result = np.concatenate([result, curr])
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +317,13 @@ def main():
         if (idx + 1) % 50 == 0 or (idx + 1) == num_frames:
             print(f"  Processed {idx + 1}/{num_frames} frames", file=sys.stderr)
 
-    # Concatenate all frame audio into one signal
-    raw_signal = np.concatenate(all_samples)
-    native_rate = len(raw_signal) / num_frames * args.fps
+    # Stitch frames with overlap detection and cross-fade
+    if args.overlap > 0:
+        print(f"Stitching frames with up to {args.overlap*100:.0f}% overlap search...")
+        raw_signal = stitch_with_overlap(all_samples, args.overlap)
+    else:
+        raw_signal = np.concatenate(all_samples)
+    native_rate = len(all_samples[0]) * args.fps  # use single-frame length for native rate
     print(f"Raw signal: {len(raw_signal)} samples at native rate ~{native_rate:.0f} Hz")
 
     # --- Resample to target sample rate ---
