@@ -12,6 +12,7 @@ Extracts audio from scanned motion picture film optical soundtracks (variable-ar
 """
 
 import argparse
+import io
 import os
 import sys
 
@@ -234,7 +235,132 @@ def apply_highpass(signal, cutoff, sample_rate, order=2):
 
 
 # ---------------------------------------------------------------------------
-# Main pipeline
+# Shared constants
+# ---------------------------------------------------------------------------
+
+SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".dpx", ".exr"}
+
+
+# ---------------------------------------------------------------------------
+# Reusable helpers for the web UI and CLI
+# ---------------------------------------------------------------------------
+
+def list_frames(input_dir):
+    """Return naturally-sorted list of image filenames in *input_dir*."""
+    names = [f for f in os.listdir(input_dir)
+             if os.path.splitext(f)[1].lower() in SUPPORTED_EXTS]
+    return natsort.natsorted(names)
+
+
+def load_frame(input_dir, filename):
+    """Load a single frame as a grayscale uint8 numpy array (or None)."""
+    return cv2.imread(os.path.join(input_dir, filename), cv2.IMREAD_GRAYSCALE)
+
+
+def rotate_image(img, degrees):
+    """Rotate an image by 0/90/180/270 degrees clockwise."""
+    if degrees == 90:
+        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    if degrees == 180:
+        return cv2.rotate(img, cv2.ROTATE_180)
+    if degrees == 270:
+        return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return img
+
+
+def crop_and_correct(img, top, bottom, left, right, rotate=0,
+                     negative=False, lift=0.0, gamma=1.0, gain=1.0,
+                     threshold=0.0):
+    """Crop, rotate, normalise and colour-correct a grayscale frame.
+
+    Returns the corrected image as a float64 array in [0, 1].
+    """
+    cropped = img[top:bottom, left:right]
+    cropped = rotate_image(cropped, rotate)
+    img_float = cropped.astype(np.float64) / 255.0
+    return correct_image(img_float, negative, lift, gamma, gain, threshold)
+
+
+def corrected_to_jpeg(img_corrected):
+    """Encode a [0,1] float image as JPEG bytes for the web preview."""
+    uint8 = (img_corrected * 255).astype(np.uint8)
+    ok, buf = cv2.imencode(".jpg", uint8, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise RuntimeError("JPEG encoding failed")
+    return buf.tobytes()
+
+
+def frame_to_jpeg(img):
+    """Encode a raw grayscale uint8 image as JPEG bytes."""
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise RuntimeError("JPEG encoding failed")
+    return buf.tobytes()
+
+
+def extract_audio(input_dir, filenames, top, bottom, left, right,
+                  rotate=0, negative=False, lift=0.0, gamma=1.0,
+                  gain=1.0, threshold=0.0, fps=24.0, sample_rate=48000,
+                  hpf=40.0, lpf=13500.0, overlap=0.25,
+                  progress_callback=None):
+    """Run the full extraction pipeline. Returns (sample_rate, int16_array).
+
+    *progress_callback*, if provided, is called with (current, total) after
+    each frame is processed.
+    """
+    all_samples = []
+    total = len(filenames)
+
+    for idx, fname in enumerate(filenames):
+        img = load_frame(input_dir, fname)
+        if img is None:
+            continue
+        corrected = crop_and_correct(
+            img, top, bottom, left, right, rotate,
+            negative, lift, gamma, gain, threshold,
+        )
+        all_samples.append(extract_scanline_audio(corrected))
+        if progress_callback and ((idx + 1) % 20 == 0 or idx + 1 == total):
+            progress_callback(idx + 1, total)
+
+    if not all_samples:
+        raise ValueError("No frames were successfully processed")
+
+    # Stitch
+    if overlap > 0 and len(all_samples) > 1:
+        raw_signal = stitch_with_overlap(all_samples, overlap)
+    else:
+        raw_signal = np.concatenate(all_samples)
+
+    native_rate = len(all_samples[0]) * fps
+
+    # Resample
+    target_n = int(len(raw_signal) * sample_rate / native_rate)
+    signal = resample(raw_signal, target_n)
+
+    # Filters
+    signal = apply_lowpass(signal, lpf, sample_rate)
+    signal = apply_highpass(signal, hpf, sample_rate)
+
+    # Normalise to int16
+    peak = np.max(np.abs(signal))
+    if peak > 0:
+        signal = signal / peak
+    signal_int16 = np.clip(signal * 32767, -32768, 32767).astype(np.int16)
+    return sample_rate, signal_int16
+
+
+def extract_audio_to_wav_bytes(input_dir, filenames, **kwargs):
+    """Run extraction and return the WAV file as an in-memory bytes object."""
+    sr, samples = extract_audio(input_dir, filenames, **kwargs)
+    buf = io.BytesIO()
+    wavfile.write(buf, sr, samples)
+    buf.seek(0)
+    return buf.read()
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline (CLI)
 # ---------------------------------------------------------------------------
 
 def main():
@@ -246,12 +372,7 @@ def main():
         sys.exit(1)
 
     # --- Discover and sort frame images ---
-    supported_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".dpx", ".exr"}
-    filenames = [
-        f for f in os.listdir(args.input)
-        if os.path.splitext(f)[1].lower() in supported_exts
-    ]
-    filenames = natsort.natsorted(filenames)
+    filenames = list_frames(args.input)
 
     if not filenames:
         print(f"Error: No image files found in '{args.input}'.", file=sys.stderr)
