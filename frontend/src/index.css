@@ -281,3 +281,5 @@ select {
 
 .extract-section { display: flex; flex-direction: column; gap: 8px; }
 .extract-section .btn-primary { width: 100%; padding: 12px; font-size: 14px; }
+.progress-bar { width: 100%; height: 8px; background: var(--surface); border-radius: 4px; overflow: hidden; }
+.progress-bar-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; border-radius: 4px; }

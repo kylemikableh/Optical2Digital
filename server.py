@@ -5,12 +5,15 @@ Run:  python server.py
 Then open http://localhost:8000 in your browser.
 """
 
+import json
 import os
 import pathlib
+import threading
+import time
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -32,6 +35,17 @@ app.add_middleware(
 _state = {
     "input_dir": None,
     "filenames": [],
+}
+
+# Extraction job state
+_extract_job = {
+    "running": False,
+    "current": 0,
+    "total": 0,
+    "phase": "",
+    "done": False,
+    "error": None,
+    "wav_bytes": None,
 }
 
 
@@ -161,22 +175,84 @@ class ExtractRequest(BaseModel):
 
 @app.post("/api/extract")
 def extract(req: ExtractRequest):
-    """Run the full extraction pipeline and return the WAV file."""
+    """Start the extraction pipeline in a background thread."""
     _check_loaded()
+
+    if _extract_job["running"]:
+        raise HTTPException(409, "Extraction already in progress")
 
     filenames = list(_state["filenames"])
     if req.reverse:
         filenames = filenames[::-1]
 
-    wav_bytes = decoder.extract_audio_to_wav_bytes(
-        _state["input_dir"], filenames,
-        top=req.top, bottom=req.bottom, left=req.left, right=req.right,
-        rotate=req.rotate, negative=req.negative, lift=req.lift,
-        gamma=req.gamma, gain=req.gain, threshold=req.threshold,
-        fps=req.fps, sample_rate=req.sample_rate,
-        hpf=req.hpf, lpf=req.lpf, overlap=req.overlap,
-        stereo=req.stereo,
-    )
+    _extract_job["running"] = True
+    _extract_job["current"] = 0
+    _extract_job["total"] = len(filenames)
+    _extract_job["phase"] = "Processing frames"
+    _extract_job["done"] = False
+    _extract_job["error"] = None
+    _extract_job["wav_bytes"] = None
+
+    def _run():
+        try:
+            def progress_cb(current, total):
+                _extract_job["current"] = current
+                _extract_job["total"] = total
+
+            wav_bytes = decoder.extract_audio_to_wav_bytes(
+                _state["input_dir"], filenames,
+                top=req.top, bottom=req.bottom, left=req.left, right=req.right,
+                rotate=req.rotate, negative=req.negative, lift=req.lift,
+                gamma=req.gamma, gain=req.gain, threshold=req.threshold,
+                fps=req.fps, sample_rate=req.sample_rate,
+                hpf=req.hpf, lpf=req.lpf, overlap=req.overlap,
+                stereo=req.stereo,
+                progress_callback=progress_cb,
+            )
+            _extract_job["wav_bytes"] = wav_bytes
+            _extract_job["phase"] = "Complete"
+        except Exception as e:
+            _extract_job["error"] = str(e)
+            _extract_job["phase"] = "Error"
+        finally:
+            _extract_job["done"] = True
+            _extract_job["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started", "total": len(filenames)}
+
+
+@app.get("/api/extract/progress")
+def extract_progress():
+    """SSE stream of extraction progress."""
+    def event_stream():
+        while True:
+            data = {
+                "current": _extract_job["current"],
+                "total": _extract_job["total"],
+                "phase": _extract_job["phase"],
+                "done": _extract_job["done"],
+                "error": _extract_job["error"],
+            }
+            yield f"data: {json.dumps(data)}\n\n"
+            if _extract_job["done"]:
+                break
+            time.sleep(0.3)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/extract/result")
+def extract_result():
+    """Download the completed WAV file."""
+    if _extract_job["running"]:
+        raise HTTPException(409, "Extraction still in progress")
+    if _extract_job["error"]:
+        raise HTTPException(500, _extract_job["error"])
+    if _extract_job["wav_bytes"] is None:
+        raise HTTPException(404, "No extraction result available")
+    wav_bytes = _extract_job["wav_bytes"]
+    _extract_job["wav_bytes"] = None  # free memory
     return Response(
         content=wav_bytes,
         media_type="audio/wav",

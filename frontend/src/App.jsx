@@ -9,18 +9,18 @@ function App() {
   const [frameWidth, setFrameWidth] = useState(0)
   const [frameHeight, setFrameHeight] = useState(0)
   const [frameIndex, setFrameIndex] = useState(0)
-  const [inputDir, setInputDir] = useState('./examples/fulltest/')
+  const [inputDir, setInputDir] = useState('./examples/output/')
   const [showLoad, setShowLoad] = useState(true)
   const [loadError, setLoadError] = useState('')
 
   // Crop
-  const [cropTop, setCropTop] = useState(2330)
-  const [trackHeight, setTrackHeight] = useState(134)
-  const [cropLeft, setCropLeft] = useState(960)
-  const [cropRight, setCropRight] = useState(2796)
+  const [cropTop, setCropTop] = useState(297)
+  const [trackHeight, setTrackHeight] = useState(3070)
+  const [cropLeft, setCropLeft] = useState(849)
+  const [cropRight, setCropRight] = useState(1191)
 
   // Corrections
-  const [rotate, setRotate] = useState(270)
+  const [rotate, setRotate] = useState(0)
   const [negative, setNegative] = useState(false)
   const [lift, setLift] = useState(0.0)
   const [gamma, setGamma] = useState(1.0)
@@ -32,15 +32,16 @@ function App() {
   const [sampleRate, setSampleRate] = useState(48000)
   const [hpf, setHpf] = useState(40.0)
   const [lpf, setLpf] = useState(13500.0)
-  const [overlap, setOverlap] = useState(0.25)
+  const [overlap, setOverlap] = useState(0.05)
   const [reverse, setReverse] = useState(false)
-  const [stereo, setStereo] = useState(false)
+  const [stereo, setStereo] = useState(true)
 
   // Crop overlay interaction
   const imgRef = useRef(null)
   const [dragState, setDragState] = useState(null)
   const [extracting, setExtracting] = useState(false)
   const [status, setStatus] = useState('')
+  const [extractProgress, setExtractProgress] = useState(null)
 
   // --- Load project ---
   const loadProject = useCallback(async () => {
@@ -175,7 +176,8 @@ function App() {
   // --- Extract ---
   const handleExtract = useCallback(async () => {
     setExtracting(true)
-    setStatus('Extracting audio...')
+    setExtractProgress(null)
+    setStatus('Starting extraction...')
     try {
       const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
       const res = await fetch(`${API}/api/extract`, {
@@ -192,7 +194,40 @@ function App() {
         const err = await res.json()
         throw new Error(err.detail || 'Extraction failed')
       }
-      const blob = await res.blob()
+
+      // Listen for SSE progress
+      await new Promise((resolve, reject) => {
+        const es = new EventSource(`${API}/api/extract/progress`)
+        es.onmessage = (ev) => {
+          const data = JSON.parse(ev.data)
+          setExtractProgress(data)
+          if (data.total > 0) {
+            const pct = Math.round((data.current / data.total) * 100)
+            setStatus(`${data.phase}: ${data.current} / ${data.total} (${pct}%)`)
+            setFrameIndex(Math.min(data.current, numFrames - 1))
+          }
+          if (data.done) {
+            es.close()
+            if (data.error) {
+              reject(new Error(data.error))
+            } else {
+              resolve()
+            }
+          }
+        }
+        es.onerror = () => {
+          es.close()
+          reject(new Error('Lost connection to server'))
+        }
+      })
+
+      // Download the result
+      const wavRes = await fetch(`${API}/api/extract/result`)
+      if (!wavRes.ok) {
+        const err = await wavRes.json()
+        throw new Error(err.detail || 'Failed to download result')
+      }
+      const blob = await wavRes.blob()
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -204,8 +239,9 @@ function App() {
       setStatus(`Error: ${e.message}`)
     } finally {
       setExtracting(false)
+      setExtractProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse, stereo])
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse, stereo, numFrames])
 
   return (
     <div className="app">
@@ -310,6 +346,14 @@ function App() {
             <button className="btn-primary" onClick={handleExtract} disabled={!loaded || extracting}>
               {extracting ? 'Extracting...' : 'Extract Audio'}
             </button>
+            {extracting && extractProgress && extractProgress.total > 0 && (
+              <div className="progress-bar">
+                <div
+                  className="progress-bar-fill"
+                  style={{ width: `${Math.round((extractProgress.current / extractProgress.total) * 100)}%` }}
+                />
+              </div>
+            )}
           </section>
         </div>
 
