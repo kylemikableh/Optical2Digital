@@ -15,6 +15,7 @@ import argparse
 import io
 import os
 import sys
+import threading
 
 import cv2
 import numpy as np
@@ -295,11 +296,150 @@ def apply_highpass(signal, cutoff, sample_rate, order=2):
     return sosfilt(sos, signal)
 
 
+def _chunked_resample(signal, target_n, chunk_seconds=30, sample_rate_hint=48000):
+    """Resample a signal in chunks to avoid a single enormous FFT.
+
+    Processes the signal in overlapping chunks, then concatenates.  This keeps
+    peak memory usage bounded regardless of total signal length.
+    """
+    n = len(signal)
+    if n <= chunk_seconds * sample_rate_hint:
+        return resample(signal, target_n)
+
+    chunk_src = chunk_seconds * sample_rate_hint
+    overlap_src = min(chunk_src // 10, 4800)  # 10% overlap for smooth joins
+    ratio = target_n / n
+
+    parts = []
+    pos = 0
+    while pos < n:
+        end = min(pos + chunk_src, n)
+        # Extend chunk by overlap on both sides for smoother edges
+        src_start = max(0, pos - overlap_src)
+        src_end = min(n, end + overlap_src)
+        chunk = signal[src_start:src_end]
+        tgt_len = int(len(chunk) * ratio)
+        resampled = resample(chunk, tgt_len)
+        # Trim the overlap regions from the resampled output
+        trim_left = int((pos - src_start) * ratio)
+        trim_right = int((src_end - end) * ratio)
+        if trim_right > 0:
+            resampled = resampled[trim_left:-trim_right]
+        else:
+            resampled = resampled[trim_left:]
+        parts.append(resampled)
+        pos = end
+
+    return np.concatenate(parts)
+
+
 # ---------------------------------------------------------------------------
 # Shared constants
 # ---------------------------------------------------------------------------
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".dpx", ".exr"}
+VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
+
+
+# ---------------------------------------------------------------------------
+# Frame source abstraction
+# ---------------------------------------------------------------------------
+
+class ImageSequenceSource:
+    """Frame source backed by a directory of image files."""
+
+    def __init__(self, input_dir):
+        self._input_dir = input_dir
+        self._filenames = list_frames(input_dir)
+        if not self._filenames:
+            raise ValueError(f"No image files found in '{input_dir}'")
+        first = cv2.imread(os.path.join(input_dir, self._filenames[0]), cv2.IMREAD_GRAYSCALE)
+        if first is None:
+            raise RuntimeError(f"Could not read first frame: {self._filenames[0]}")
+        self._frame_height, self._frame_width = first.shape
+
+    @property
+    def num_frames(self):
+        return len(self._filenames)
+
+    @property
+    def frame_width(self):
+        return self._frame_width
+
+    @property
+    def frame_height(self):
+        return self._frame_height
+
+    @property
+    def fps(self):
+        return None
+
+    def load_frame(self, index):
+        """Load frame by index as grayscale uint8 (or None)."""
+        if index < 0 or index >= len(self._filenames):
+            return None
+        return cv2.imread(
+            os.path.join(self._input_dir, self._filenames[index]),
+            cv2.IMREAD_GRAYSCALE,
+        )
+
+
+class VideoSource:
+    """Frame source backed by a video file (mp4, mov, avi, mkv)."""
+
+    def __init__(self, video_path):
+        self._path = video_path
+        self._cap = cv2.VideoCapture(video_path)
+        if not self._cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+        self._num_frames = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._fps = self._cap.get(cv2.CAP_PROP_FPS)
+        self._frame_width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self._frame_height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._lock = threading.Lock()
+
+    @property
+    def num_frames(self):
+        return self._num_frames
+
+    @property
+    def frame_width(self):
+        return self._frame_width
+
+    @property
+    def frame_height(self):
+        return self._frame_height
+
+    @property
+    def fps(self):
+        return self._fps
+
+    def load_frame(self, index):
+        """Seek to *index* and return the frame as grayscale uint8 (or None)."""
+        if index < 0 or index >= self._num_frames:
+            return None
+        with self._lock:
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, index)
+            ok, frame = self._cap.read()
+        if not ok or frame is None:
+            return None
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    def close(self):
+        self._cap.release()
+
+
+def open_source(path):
+    """Open a frame source from a directory of images or a video file."""
+    p = os.path.abspath(path)
+    if os.path.isfile(p):
+        ext = os.path.splitext(p)[1].lower()
+        if ext in VIDEO_EXTS:
+            return VideoSource(p)
+        raise ValueError(f"Unsupported file type: {ext}")
+    if os.path.isdir(p):
+        return ImageSequenceSource(p)
+    raise ValueError(f"Path not found: {p}")
 
 
 # ---------------------------------------------------------------------------
@@ -365,23 +505,42 @@ def frame_to_jpeg(img):
     return buf.tobytes()
 
 
-def extract_audio(input_dir, filenames, top, bottom, left, right,
+def extract_audio(source, top, bottom, left, right,
                   rotate=0, negative=False, lift=0.0, gamma=1.0,
                   gain=1.0, threshold=0.0, fps=24.0, sample_rate=48000,
                   hpf=40.0, lpf=13500.0, overlap=0.25,
-                  stereo=False, progress_callback=None):
+                  stereo=False, progress_callback=None, reverse=False,
+                  phase_callback=None, start_frame=0, end_frame=None):
     """Run the full extraction pipeline. Returns (sample_rate, int16_array).
 
+    *source* is a FrameSource object (ImageSequenceSource or VideoSource).
     When *stereo* is True, returns a 2-channel int16 array (N, 2).
     *progress_callback*, if provided, is called with (current, total) after
     each frame is processed.
+    *phase_callback*, if provided, is called with a string describing the
+    current processing phase.
+    *start_frame* and *end_frame* allow processing a sub-range of frames
+    (end_frame is inclusive; defaults to the last frame).
     """
+    def _phase(msg):
+        if phase_callback:
+            phase_callback(msg)
+
+    if end_frame is None:
+        end_frame = source.num_frames - 1
+    end_frame = min(end_frame, source.num_frames - 1)
+    start_frame = max(0, start_frame)
+
+    _phase("Processing frames")
     all_left = []
     all_right = [] if stereo else None
-    total = len(filenames)
+    indices = list(range(start_frame, end_frame + 1))
+    if reverse:
+        indices = indices[::-1]
+    total = len(indices)
 
-    for idx, fname in enumerate(filenames):
-        img = load_frame(input_dir, fname)
+    for count, idx in enumerate(indices):
+        img = source.load_frame(idx)
         if img is None:
             continue
         corrected = crop_and_correct(
@@ -394,15 +553,15 @@ def extract_audio(input_dir, filenames, top, bottom, left, right,
             all_right.append(r_ch)
         else:
             all_left.append(extract_scanline_audio(corrected))
-        if progress_callback and ((idx + 1) % 20 == 0 or idx + 1 == total):
-            progress_callback(idx + 1, total)
+        if progress_callback and ((count + 1) % 20 == 0 or count + 1 == total):
+            progress_callback(count + 1, total)
 
     if not all_left:
         raise ValueError("No frames were successfully processed")
 
     # Compute overlap offsets once from mono (or left channel) for sample-accurate sync
     if stereo and overlap > 0 and len(all_left) > 1:
-        # Use the average of L+R to find overlaps so both channels stay in sync
+        _phase("Computing overlap offsets")
         all_mono = [(l + r) / 2.0 for l, r in zip(all_left, all_right)]
         offsets = compute_overlap_offsets(all_mono, overlap)
     elif overlap > 0 and len(all_left) > 1:
@@ -410,7 +569,8 @@ def extract_audio(input_dir, filenames, top, bottom, left, right,
     else:
         offsets = None
 
-    def _process_channel(all_samples, shared_offsets=None):
+    def _process_channel(all_samples, label, shared_offsets=None):
+        _phase(f"Stitching {label}")
         if shared_offsets is not None:
             raw_signal = apply_overlap_offsets(all_samples, shared_offsets)
         elif overlap > 0 and len(all_samples) > 1:
@@ -419,7 +579,9 @@ def extract_audio(input_dir, filenames, top, bottom, left, right,
             raw_signal = np.concatenate(all_samples)
         native_rate = len(all_samples[0]) * fps
         target_n = int(len(raw_signal) * sample_rate / native_rate)
-        signal = resample(raw_signal, target_n)
+        _phase(f"Resampling {label}")
+        signal = _chunked_resample(raw_signal, target_n)
+        _phase(f"Filtering {label}")
         signal = apply_lowpass(signal, lpf, sample_rate)
         signal = apply_highpass(signal, hpf, sample_rate)
         peak = np.max(np.abs(signal))
@@ -427,9 +589,9 @@ def extract_audio(input_dir, filenames, top, bottom, left, right,
             signal = signal / peak
         return np.clip(signal * 32767, -32768, 32767).astype(np.int16)
 
-    left_int16 = _process_channel(all_left, offsets)
+    left_int16 = _process_channel(all_left, "audio" if not stereo else "left channel", offsets)
     if stereo:
-        right_int16 = _process_channel(all_right, offsets)
+        right_int16 = _process_channel(all_right, "right channel", offsets)
         signal_int16 = np.column_stack([left_int16, right_int16])
     else:
         signal_int16 = left_int16
@@ -437,9 +599,9 @@ def extract_audio(input_dir, filenames, top, bottom, left, right,
     return sample_rate, signal_int16
 
 
-def extract_audio_to_wav_bytes(input_dir, filenames, **kwargs):
+def extract_audio_to_wav_bytes(source, **kwargs):
     """Run extraction and return the WAV file as an in-memory bytes object."""
-    sr, samples = extract_audio(input_dir, filenames, **kwargs)
+    sr, samples = extract_audio(source, **kwargs)
     buf = io.BytesIO()
     wavfile.write(buf, sr, samples)
     buf.seek(0)
@@ -453,24 +615,23 @@ def extract_audio_to_wav_bytes(input_dir, filenames, **kwargs):
 def main():
     args = parse_args()
 
-    # --- Validate input directory ---
-    if not os.path.isdir(args.input):
-        print(f"Error: '{args.input}' is not a directory.", file=sys.stderr)
+    # --- Open frame source (directory or video file) ---
+    try:
+        source = open_source(args.input)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Discover and sort frame images ---
-    filenames = list_frames(args.input)
+    num_frames = source.num_frames
+    if source.fps is not None:
+        print(f"Video source: {num_frames} frames at {source.fps:.3f} fps")
+        if args.fps == 24.0:  # default — override with video fps
+            args.fps = source.fps
+    else:
+        print(f"Image sequence: {num_frames} frames")
 
-    if not filenames:
-        print(f"Error: No image files found in '{args.input}'.", file=sys.stderr)
-        sys.exit(1)
-
-    if args.reverse:
-        filenames = filenames[::-1]
-
-    num_frames = len(filenames)
     top, bottom, left, right = args.crop
-    print(f"Found {num_frames} frames, crop region: top={top} bottom={bottom} left={left} right={right}")
+    print(f"Crop region: top={top} bottom={bottom} left={left} right={right}")
 
     # --- Prepare crop dump directory if requested ---
     if args.dump_crops:
@@ -480,11 +641,14 @@ def main():
     # --- Process frames ---
     all_samples = []
 
-    for idx, fname in enumerate(filenames):
-        filepath = os.path.join(args.input, fname)
-        img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
+    indices = list(range(num_frames))
+    if args.reverse:
+        indices = indices[::-1]
+
+    for count, frame_idx in enumerate(indices):
+        img = source.load_frame(frame_idx)
         if img is None:
-            print(f"  Warning: Could not read '{filepath}', skipping.", file=sys.stderr)
+            print(f"  Warning: Could not read frame {frame_idx}, skipping.", file=sys.stderr)
             continue
 
         # Crop to soundtrack region
@@ -513,17 +677,16 @@ def main():
 
         # Dump cropped image if requested
         if args.dump_crops:
-            dump_path = os.path.join(args.dump_crops, fname)
+            dump_path = os.path.join(args.dump_crops, f"frame_{frame_idx:06d}.png")
             cv2.imwrite(dump_path, (img_corrected * 255).astype(np.uint8))
-
 
         # Extract audio: mean brightness per row → one sample per scanline
         frame_samples = extract_scanline_audio(img_corrected)
         all_samples.append(frame_samples)
 
         # Progress
-        if (idx + 1) % 50 == 0 or (idx + 1) == num_frames:
-            print(f"  Processed {idx + 1}/{num_frames} frames", file=sys.stderr)
+        if (count + 1) % 50 == 0 or (count + 1) == num_frames:
+            print(f"  Processed {count + 1}/{num_frames} frames", file=sys.stderr)
 
     # Stitch frames with overlap detection and cross-fade
     if args.overlap > 0:

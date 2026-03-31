@@ -33,8 +33,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 _state = {
-    "input_dir": None,
-    "filenames": [],
+    "source": None,
 }
 
 # Extraction job state
@@ -60,46 +59,38 @@ class LoadProjectResponse(BaseModel):
     num_frames: int
     frame_width: int
     frame_height: int
+    fps: float | None = None
 
 @app.post("/api/load", response_model=LoadProjectResponse)
 def load_project(req: LoadProjectRequest):
-    """Point the server at a directory of scanned frame images."""
-    d = os.path.abspath(req.input_dir)
-    if not os.path.isdir(d):
-        raise HTTPException(404, f"Directory not found: {d}")
+    """Point the server at a directory of frame images or a video file."""
+    try:
+        source = decoder.open_source(req.input_dir)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
 
-    filenames = decoder.list_frames(d)
-    if not filenames:
-        raise HTTPException(400, "No image files found in directory")
+    _state["source"] = source
 
-    # Read first frame for dimensions
-    first = decoder.load_frame(d, filenames[0])
-    if first is None:
-        raise HTTPException(500, "Could not read first frame image")
-
-    _state["input_dir"] = d
-    _state["filenames"] = filenames
-
-    h, w = first.shape
-    return LoadProjectResponse(num_frames=len(filenames), frame_width=w, frame_height=h)
-
-
-@app.get("/api/frames")
-def get_frame_list():
-    """Return the sorted list of frame filenames."""
-    if not _state["filenames"]:
-        raise HTTPException(400, "No project loaded")
-    return {"filenames": _state["filenames"]}
+    return LoadProjectResponse(
+        num_frames=source.num_frames,
+        frame_width=source.frame_width,
+        frame_height=source.frame_height,
+        fps=source.fps,
+    )
 
 
 @app.get("/api/frame/{index}/raw")
 def get_raw_frame(index: int, rotate: int = Query(0)):
     """Return the raw (uncropped) frame as a JPEG for preview."""
     _check_loaded()
-    fname = _get_filename(index)
-    img = decoder.load_frame(_state["input_dir"], fname)
+    source = _state["source"]
+    if index < 0 or index >= source.num_frames:
+        raise HTTPException(404, f"Frame index {index} out of range (0–{source.num_frames - 1})")
+    img = source.load_frame(index)
     if img is None:
-        raise HTTPException(500, f"Could not read frame: {fname}")
+        raise HTTPException(500, f"Could not read frame {index}")
     img = decoder.rotate_image(img, rotate)
     return Response(content=decoder.frame_to_jpeg(img), media_type="image/jpeg")
 
@@ -116,10 +107,12 @@ def get_corrected_frame(
 ):
     """Return full frame with corrections applied (no crop), rotated, as JPEG."""
     _check_loaded()
-    fname = _get_filename(index)
-    img = decoder.load_frame(_state["input_dir"], fname)
+    source = _state["source"]
+    if index < 0 or index >= source.num_frames:
+        raise HTTPException(404, f"Frame index {index} out of range (0–{source.num_frames - 1})")
+    img = source.load_frame(index)
     if img is None:
-        raise HTTPException(500, f"Could not read frame: {fname}")
+        raise HTTPException(500, f"Could not read frame {index}")
     corrected = decoder.correct_full_frame(img, negative, lift, gamma, gain, threshold)
     corrected = decoder.rotate_image(corrected, rotate)
     return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
@@ -141,10 +134,12 @@ def get_preview_frame(
 ):
     """Return a cropped+corrected frame as JPEG (for live preview)."""
     _check_loaded()
-    fname = _get_filename(index)
-    img = decoder.load_frame(_state["input_dir"], fname)
+    source = _state["source"]
+    if index < 0 or index >= source.num_frames:
+        raise HTTPException(404, f"Frame index {index} out of range (0–{source.num_frames - 1})")
+    img = source.load_frame(index)
     if img is None:
-        raise HTTPException(500, f"Could not read frame: {fname}")
+        raise HTTPException(500, f"Could not read frame {index}")
 
     corrected = decoder.crop_and_correct(
         img, top, bottom, left, right, rotate,
@@ -171,6 +166,8 @@ class ExtractRequest(BaseModel):
     overlap: float = 0.25
     reverse: bool = False
     stereo: bool = False
+    start_frame: int = 0
+    end_frame: int | None = None
 
 
 @app.post("/api/extract")
@@ -181,13 +178,16 @@ def extract(req: ExtractRequest):
     if _extract_job["running"]:
         raise HTTPException(409, "Extraction already in progress")
 
-    filenames = list(_state["filenames"])
-    if req.reverse:
-        filenames = filenames[::-1]
+    source = _state["source"]
+
+    start = max(0, req.start_frame)
+    end = req.end_frame if req.end_frame is not None else source.num_frames - 1
+    end = min(end, source.num_frames - 1)
+    frame_count = end - start + 1
 
     _extract_job["running"] = True
     _extract_job["current"] = 0
-    _extract_job["total"] = len(filenames)
+    _extract_job["total"] = frame_count
     _extract_job["phase"] = "Processing frames"
     _extract_job["done"] = False
     _extract_job["error"] = None
@@ -199,15 +199,20 @@ def extract(req: ExtractRequest):
                 _extract_job["current"] = current
                 _extract_job["total"] = total
 
+            def phase_cb(phase):
+                _extract_job["phase"] = phase
+
             wav_bytes = decoder.extract_audio_to_wav_bytes(
-                _state["input_dir"], filenames,
+                source,
                 top=req.top, bottom=req.bottom, left=req.left, right=req.right,
                 rotate=req.rotate, negative=req.negative, lift=req.lift,
                 gamma=req.gamma, gain=req.gain, threshold=req.threshold,
                 fps=req.fps, sample_rate=req.sample_rate,
                 hpf=req.hpf, lpf=req.lpf, overlap=req.overlap,
-                stereo=req.stereo,
+                stereo=req.stereo, reverse=req.reverse,
+                start_frame=req.start_frame, end_frame=req.end_frame,
                 progress_callback=progress_cb,
+                phase_callback=phase_cb,
             )
             _extract_job["wav_bytes"] = wav_bytes
             _extract_job["phase"] = "Complete"
@@ -219,7 +224,7 @@ def extract(req: ExtractRequest):
             _extract_job["running"] = False
 
     threading.Thread(target=_run, daemon=True).start()
-    return {"status": "started", "total": len(filenames)}
+    return {"status": "started", "total": frame_count}
 
 
 @app.get("/api/extract/progress")
@@ -265,14 +270,9 @@ def extract_result():
 # ---------------------------------------------------------------------------
 
 def _check_loaded():
-    if not _state["input_dir"] or not _state["filenames"]:
+    if _state["source"] is None:
         raise HTTPException(400, "No project loaded. POST /api/load first.")
 
-
-def _get_filename(index: int) -> str:
-    if index < 0 or index >= len(_state["filenames"]):
-        raise HTTPException(404, f"Frame index {index} out of range (0–{len(_state['filenames'])-1})")
-    return _state["filenames"][index]
 
 
 # ---------------------------------------------------------------------------

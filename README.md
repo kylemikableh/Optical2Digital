@@ -17,9 +17,48 @@ A basic web-based application now exists that converts individual images that co
 ## Kyle's Optical Decoder
 Python CLI tool that can extract film optical audio
 
-To run application in UI mode:
-`python server.py`
-`cd frontend && npm run dev`
+### Prerequisites
+- Python 3.10+
+- Node.js 18+
+
+### Setup
+
+**Backend (Python):**
+```bash
+python -m venv .venv
+source .venv/bin/activate   # macOS/Linux
+# .venv\Scripts\activate    # Windows
+
+pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic
+```
+
+**Frontend (React):**
+```bash
+cd frontend
+npm install
+```
+
+### Running
+
+Start the backend server:
+```bash
+python server.py
+```
+
+Start the frontend dev server (in a separate terminal):
+```bash
+cd frontend
+npm run dev
+```
+
+Then open http://localhost:5173 in your browser.
+
+### CLI Usage
+
+`KylesOpticalDecoder.py` can also be used standalone from the command line:
+```bash
+python KylesOpticalDecoder.py --help
+```
 
 ## Theory of Operation
 TODO

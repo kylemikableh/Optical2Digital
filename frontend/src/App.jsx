@@ -35,6 +35,8 @@ function App() {
   const [overlap, setOverlap] = useState(0.05)
   const [reverse, setReverse] = useState(false)
   const [stereo, setStereo] = useState(true)
+  const [startFrame, setStartFrame] = useState(0)
+  const [endFrame, setEndFrame] = useState(0)
 
   // Crop overlay interaction
   const imgRef = useRef(null)
@@ -61,9 +63,15 @@ function App() {
       setFrameWidth(data.frame_width)
       setFrameHeight(data.frame_height)
       setFrameIndex(0)
+      if (data.fps) {
+        setFps(data.fps)
+      }
+      setStartFrame(0)
+      setEndFrame(data.num_frames - 1)
       setLoaded(true)
       setShowLoad(false)
-      setStatus(`Loaded ${data.num_frames} frames (${data.frame_width}×${data.frame_height})`)
+      const label = data.fps ? 'video' : 'image sequence'
+      setStatus(`Loaded ${data.num_frames} frames (${data.frame_width}×${data.frame_height}, ${label})`)
     } catch (e) {
       setLoadError(e.message)
     }
@@ -188,6 +196,8 @@ function App() {
           rotate, negative, lift, gamma, gain, threshold,
           fps, sample_rate: sampleRate, hpf, lpf, overlap, reverse,
           stereo,
+          start_frame: startFrame,
+          end_frame: endFrame,
         }),
       })
       if (!res.ok) {
@@ -201,10 +211,12 @@ function App() {
         es.onmessage = (ev) => {
           const data = JSON.parse(ev.data)
           setExtractProgress(data)
-          if (data.total > 0) {
+          if (data.total > 0 && data.current < data.total) {
             const pct = Math.round((data.current / data.total) * 100)
             setStatus(`${data.phase}: ${data.current} / ${data.total} (${pct}%)`)
             setFrameIndex(Math.min(data.current, numFrames - 1))
+          } else if (data.phase && !data.done) {
+            setStatus(`${data.phase}...`)
           }
           if (data.done) {
             es.close()
@@ -241,7 +253,7 @@ function App() {
       setExtracting(false)
       setExtractProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse, stereo, numFrames])
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse, stereo, startFrame, endFrame, numFrames])
 
   return (
     <div className="app">
@@ -249,12 +261,12 @@ function App() {
       {showLoad && (
         <div className="load-overlay">
           <div className="load-dialog">
-            <h2>Load Frame Directory</h2>
+            <h2>Load Frames</h2>
             <input
               type="text"
               value={inputDir}
               onChange={e => setInputDir(e.target.value)}
-              placeholder="Path to frame images directory..."
+              placeholder="Path to image directory or video file..."
               onKeyDown={e => e.key === 'Enter' && loadProject()}
             />
             {loadError && <p className="error">{loadError}</p>}
@@ -337,6 +349,8 @@ function App() {
                 <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
                 <label htmlFor="stereo">Stereo (split L/R)</label>
               </div>
+              <NumberInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} />
+              <NumberInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} />
             </div>
           </section>
 
