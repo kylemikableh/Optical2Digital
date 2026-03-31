@@ -5,3 +5,4 @@ output/
 *.wav
 debug_crops/
 docs/
+__pycache__/

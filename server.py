@@ -79,14 +79,36 @@ def get_frame_list():
 
 
 @app.get("/api/frame/{index}/raw")
-def get_raw_frame(index: int):
+def get_raw_frame(index: int, rotate: int = Query(0)):
     """Return the raw (uncropped) frame as a JPEG for preview."""
     _check_loaded()
     fname = _get_filename(index)
     img = decoder.load_frame(_state["input_dir"], fname)
     if img is None:
         raise HTTPException(500, f"Could not read frame: {fname}")
+    img = decoder.rotate_image(img, rotate)
     return Response(content=decoder.frame_to_jpeg(img), media_type="image/jpeg")
+
+
+@app.get("/api/frame/{index}/corrected")
+def get_corrected_frame(
+    index: int,
+    rotate: int = Query(0),
+    negative: bool = Query(False),
+    lift: float = Query(0.0),
+    gamma: float = Query(1.0),
+    gain: float = Query(1.0),
+    threshold: float = Query(0.0),
+):
+    """Return full frame with corrections applied (no crop), rotated, as JPEG."""
+    _check_loaded()
+    fname = _get_filename(index)
+    img = decoder.load_frame(_state["input_dir"], fname)
+    if img is None:
+        raise HTTPException(500, f"Could not read frame: {fname}")
+    corrected = decoder.correct_full_frame(img, negative, lift, gamma, gain, threshold)
+    corrected = decoder.rotate_image(corrected, rotate)
+    return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
 
 
 @app.get("/api/frame/{index}/preview")

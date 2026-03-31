@@ -281,6 +281,12 @@ def crop_and_correct(img, top, bottom, left, right, rotate=0,
     return correct_image(img_float, negative, lift, gamma, gain, threshold)
 
 
+def correct_full_frame(img, negative=False, lift=0.0, gamma=1.0, gain=1.0, threshold=0.0):
+    """Apply corrections to the full frame (no crop/rotation). Returns float64 [0,1]."""
+    img_float = img.astype(np.float64) / 255.0
+    return correct_image(img_float, negative, lift, gamma, gain, threshold)
+
+
 def corrected_to_jpeg(img_corrected):
     """Encode a [0,1] float image as JPEG bytes for the web preview."""
     uint8 = (img_corrected * 255).astype(np.uint8)

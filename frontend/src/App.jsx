@@ -15,7 +15,7 @@ function App() {
 
   // Crop
   const [cropTop, setCropTop] = useState(2330)
-  const [cropBottom, setCropBottom] = useState(2464)
+  const [trackHeight, setTrackHeight] = useState(134)
   const [cropLeft, setCropLeft] = useState(960)
   const [cropRight, setCropRight] = useState(2796)
 
@@ -35,8 +35,9 @@ function App() {
   const [overlap, setOverlap] = useState(0.25)
   const [reverse, setReverse] = useState(false)
 
-  // View mode: 'raw' or 'preview'
-  const [viewMode, setViewMode] = useState('preview')
+  // Crop overlay interaction
+  const imgRef = useRef(null)
+  const [dragState, setDragState] = useState(null)
   const [extracting, setExtracting] = useState(false)
   const [status, setStatus] = useState('')
 
@@ -66,31 +67,121 @@ function App() {
     }
   }, [inputDir])
 
-  // --- Image URLs ---
+  // --- Image URLs (server returns already-rotated images) ---
   const rawUrl = loaded
-    ? `${API}/api/frame/${frameIndex}/raw`
+    ? `${API}/api/frame/${frameIndex}/raw?rotate=${rotate}`
     : null
 
-  const previewParams = new URLSearchParams({
-    top: cropTop, bottom: cropBottom, left: cropLeft, right: cropRight,
+  const correctedParams = new URLSearchParams({
     rotate, negative, lift, gamma, gain, threshold,
   }).toString()
-  const previewUrl = loaded
-    ? `${API}/api/frame/${frameIndex}/preview?${previewParams}`
+  const correctedUrl = loaded
+    ? `${API}/api/frame/${frameIndex}/corrected?${correctedParams}`
     : null
 
-  const imgSrc = viewMode === 'raw' ? rawUrl : previewUrl
+  // Screen dimensions after rotation
+  const screenWidth = (rotate === 90 || rotate === 270) ? frameHeight : frameWidth
+  const screenHeight = (rotate === 90 || rotate === 270) ? frameWidth : frameHeight
+
+  // Derived crop bottom from top + trackHeight
+  const cropBottom = cropTop + trackHeight
+
+  // Overlap in pixels
+  const overlapPx = Math.round(trackHeight * overlap)
+  const overlapTopY = Math.max(0, cropTop - overlapPx)
+  const overlapBottomY = Math.min(screenHeight, cropBottom + overlapPx)
+
+  // Crop region as percentages of screen dimensions
+  const topPct = screenHeight > 0 ? (cropTop / screenHeight * 100) : 0
+  const bottomPct = screenHeight > 0 ? (cropBottom / screenHeight * 100) : 0
+  const leftPct = screenWidth > 0 ? (cropLeft / screenWidth * 100) : 0
+  const rightPct = screenWidth > 0 ? (cropRight / screenWidth * 100) : 0
+
+  // Overlap zone percentages
+  const overlapTopPct = screenHeight > 0 ? (overlapTopY / screenHeight * 100) : 0
+  const overlapBottomPct = screenHeight > 0 ? (overlapBottomY / screenHeight * 100) : 0
+
+  // Convert screen-space crop to image-space crop for API calls
+  function screenToImageCrop(sTop, sBot, sLeft, sRight) {
+    const W = frameWidth, H = frameHeight
+    switch (rotate) {
+      case 90:  return { top: H - sRight, bottom: H - sLeft, left: sTop, right: sBot }
+      case 180: return { top: H - sBot, bottom: H - sTop, left: W - sRight, right: W - sLeft }
+      case 270: return { top: sLeft, bottom: sRight, left: W - sBot, right: W - sTop }
+      default:  return { top: sTop, bottom: sBot, left: sLeft, right: sRight }
+    }
+  }
+
+  // --- Crop drag handling ---
+  useEffect(() => {
+    if (!dragState) return
+    const cursors = {
+      move: 'move', t: 'ns-resize', b: 'ns-resize',
+      l: 'ew-resize', r: 'ew-resize',
+      tl: 'nwse-resize', br: 'nwse-resize',
+      tr: 'nesw-resize', bl: 'nesw-resize',
+    }
+    document.body.style.cursor = cursors[dragState.type] || 'default'
+    document.body.style.userSelect = 'none'
+
+    const handleMouseMove = (e) => {
+      if (!imgRef.current) return
+      const scale = imgRef.current.offsetWidth / screenWidth
+      const dx = Math.round((e.clientX - dragState.startX) / scale)
+      const dy = Math.round((e.clientY - dragState.startY) / scale)
+      const { type, origTop, origBottom, origLeft, origRight } = dragState
+      const clampX = v => Math.max(0, Math.min(screenWidth, v))
+      const clampY = v => Math.max(0, Math.min(screenHeight, v))
+
+      if (type === 'move') {
+        const w = origRight - origLeft
+        const h = origBottom - origTop
+        let nl = Math.max(0, Math.min(screenWidth - w, origLeft + dx))
+        let nt = Math.max(0, Math.min(screenHeight - h, origTop + dy))
+        setCropLeft(nl); setCropRight(nl + w)
+        setCropTop(nt)
+      } else {
+        // Top edge: move top, adjust trackHeight
+        if (type.includes('t')) {
+          const newTop = clampY(Math.min(origTop + dy, origBottom - 10))
+          setCropTop(newTop)
+          setTrackHeight(origBottom - newTop)
+        }
+        // Bottom edge: adjust trackHeight, keep top fixed
+        if (type.includes('b')) {
+          const newBottom = clampY(Math.max(origBottom + dy, origTop + 10))
+          setTrackHeight(newBottom - origTop)
+        }
+        if (type.includes('l')) setCropLeft(clampX(Math.min(origLeft + dx, dragState.origRight - 10)))
+        if (type.includes('r')) setCropRight(clampX(Math.max(origRight + dx, dragState.origLeft + 10)))
+      }
+    }
+    const handleMouseUp = () => {
+      setDragState(null)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [dragState, screenWidth, screenHeight, trackHeight])
 
   // --- Extract ---
   const handleExtract = useCallback(async () => {
     setExtracting(true)
     setStatus('Extracting audio...')
     try {
+      const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
       const res = await fetch(`${API}/api/extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          top: cropTop, bottom: cropBottom, left: cropLeft, right: cropRight,
+          top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
           rotate, negative, lift, gamma, gain, threshold,
           fps, sample_rate: sampleRate, hpf, lpf, overlap, reverse,
         }),
@@ -112,7 +203,7 @@ function App() {
     } finally {
       setExtracting(false)
     }
-  }, [cropTop, cropBottom, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse])
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse])
 
   return (
     <div className="app">
@@ -155,10 +246,10 @@ function App() {
           <section>
             <h3>Crop Region</h3>
             <div className="control-group">
-              <NumberInput label="Top" value={cropTop} onChange={setCropTop} min={0} max={frameHeight} />
-              <NumberInput label="Bottom" value={cropBottom} onChange={setCropBottom} min={0} max={frameHeight} />
-              <NumberInput label="Left" value={cropLeft} onChange={setCropLeft} min={0} max={frameWidth} />
-              <NumberInput label="Right" value={cropRight} onChange={setCropRight} min={0} max={frameWidth} />
+              <NumberInput label="Top" value={cropTop} onChange={setCropTop} min={0} max={screenHeight - trackHeight} />
+              <NumberInput label="Track Height" value={trackHeight} onChange={setTrackHeight} min={10} max={screenHeight} />
+              <NumberInput label="Left" value={cropLeft} onChange={setCropLeft} min={0} max={screenWidth} />
+              <NumberInput label="Right" value={cropRight} onChange={setCropRight} min={0} max={screenWidth} />
             </div>
           </section>
 
@@ -216,15 +307,67 @@ function App() {
           </section>
         </div>
 
-        {/* Preview */}
+        {/* Preview with interactive crop overlay */}
         <div className="preview-area">
-          <div className="tab-bar">
-            <button className={viewMode === 'raw' ? 'active' : ''} onClick={() => setViewMode('raw')}>Raw Frame</button>
-            <button className={viewMode === 'preview' ? 'active' : ''} onClick={() => setViewMode('preview')}>Cropped + Corrected</button>
-          </div>
-          <div className="preview-container">
-            {loaded && imgSrc ? (
-              <img src={imgSrc} alt={`Frame ${frameIndex}`} />
+          <div className="crop-canvas">
+            {loaded && rawUrl ? (
+              <div className="image-wrapper">
+                <img ref={imgRef} src={rawUrl} alt={`Frame ${frameIndex}`} className="base-image" />
+                {/* Corrected image clipped to crop region */}
+                <img
+                  src={correctedUrl} alt="" className="corrected-image"
+                  style={{ clipPath: `inset(${topPct}% ${100 - rightPct}% ${100 - bottomPct}% ${leftPct}%)` }}
+                />
+                {/* Overlap zones */}
+                {overlapPx > 0 && (
+                  <>
+                    <div className="overlap-zone" style={{
+                      top: `${overlapTopPct}%`, left: `${leftPct}%`,
+                      width: `${rightPct - leftPct}%`, height: `${topPct - overlapTopPct}%`,
+                    }} />
+                    <div className="overlap-zone" style={{
+                      top: `${bottomPct}%`, left: `${leftPct}%`,
+                      width: `${rightPct - leftPct}%`, height: `${overlapBottomPct - bottomPct}%`,
+                    }} />
+                  </>
+                )}
+                {/* Dim overlay outside crop+overlap */}
+                <div className="crop-dim" style={{ top: 0, left: 0, right: 0, height: `${topPct}%` }} />
+                <div className="crop-dim" style={{ bottom: 0, left: 0, right: 0, height: `${100 - bottomPct}%` }} />
+                <div className="crop-dim" style={{ top: `${topPct}%`, left: 0, width: `${leftPct}%`, bottom: `${100 - bottomPct}%` }} />
+                <div className="crop-dim" style={{ top: `${topPct}%`, right: 0, width: `${100 - rightPct}%`, bottom: `${100 - bottomPct}%` }} />
+                {/* Frame boundary lines — full width */}
+                <div className="frame-line" style={{ top: `${topPct}%` }} />
+                <div className="frame-line" style={{ top: `${bottomPct}%` }} />
+                {/* Crop border */}
+                <div className="crop-border" style={{
+                  top: `${topPct}%`, left: `${leftPct}%`,
+                  width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%`,
+                }} />
+                {/* Draggable move area */}
+                <div
+                  className="crop-move-area"
+                  style={{ top: `${topPct}%`, left: `${leftPct}%`, width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%` }}
+                  onMouseDown={e => { e.preventDefault(); setDragState({ type: 'move', startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight }) }}
+                />
+                {/* Corner + edge drag handles — vertical handles move box, horizontal resize width */}
+                {[
+                  { type: 'tl', top: topPct, left: leftPct, cursor: 'nwse-resize' },
+                  { type: 'tr', top: topPct, left: rightPct, cursor: 'nesw-resize' },
+                  { type: 'bl', top: bottomPct, left: leftPct, cursor: 'nesw-resize' },
+                  { type: 'br', top: bottomPct, left: rightPct, cursor: 'nwse-resize' },
+                  { type: 't', top: topPct, left: (leftPct + rightPct) / 2, cursor: 'ns-resize' },
+                  { type: 'b', top: bottomPct, left: (leftPct + rightPct) / 2, cursor: 'ns-resize' },
+                  { type: 'l', top: (topPct + bottomPct) / 2, left: leftPct, cursor: 'ew-resize' },
+                  { type: 'r', top: (topPct + bottomPct) / 2, left: rightPct, cursor: 'ew-resize' },
+                ].map(h => (
+                  <div
+                    key={h.type} className="crop-handle"
+                    style={{ top: `${h.top}%`, left: `${h.left}%`, transform: 'translate(-50%, -50%)', cursor: h.cursor }}
+                    onMouseDown={e => { e.preventDefault(); e.stopPropagation(); setDragState({ type: h.type, startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight }) }}
+                  />
+                ))}
+              </div>
             ) : (
               <p style={{ color: 'var(--text-muted)' }}>Load a project to preview frames</p>
             )}
