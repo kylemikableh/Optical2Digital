@@ -34,6 +34,7 @@ function App() {
   const [lpf, setLpf] = useState(13500.0)
   const [overlap, setOverlap] = useState(0.25)
   const [reverse, setReverse] = useState(false)
+  const [stereo, setStereo] = useState(false)
 
   // Crop overlay interaction
   const imgRef = useRef(null)
@@ -184,6 +185,7 @@ function App() {
           top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
           rotate, negative, lift, gamma, gain, threshold,
           fps, sample_rate: sampleRate, hpf, lpf, overlap, reverse,
+          stereo,
         }),
       })
       if (!res.ok) {
@@ -203,7 +205,7 @@ function App() {
     } finally {
       setExtracting(false)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse])
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse, stereo])
 
   return (
     <div className="app">
@@ -295,6 +297,10 @@ function App() {
                 <input type="checkbox" id="rev" checked={reverse} onChange={e => setReverse(e.target.checked)} />
                 <label htmlFor="rev">Reverse frame order</label>
               </div>
+              <div className="checkbox-row">
+                <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
+                <label htmlFor="stereo">Stereo (split L/R)</label>
+              </div>
             </div>
           </section>
 
@@ -339,6 +345,13 @@ function App() {
                 {/* Frame boundary lines — full width */}
                 <div className="frame-line" style={{ top: `${topPct}%` }} />
                 <div className="frame-line" style={{ top: `${bottomPct}%` }} />
+                {/* Stereo center line */}
+                {stereo && (
+                  <div className="stereo-center-line" style={{
+                    top: `${topPct}%`, left: `${(leftPct + rightPct) / 2}%`,
+                    height: `${bottomPct - topPct}%`,
+                  }} />
+                )}
                 {/* Crop border */}
                 <div className="crop-border" style={{
                   top: `${topPct}%`, left: `${leftPct}%`,
@@ -392,6 +405,7 @@ function App() {
       {/* Status bar */}
       <div className="status-bar">
         <span>{status}</span>
+        <span>By Kyle Mikolajczyk</span>
       </div>
     </div>
   )

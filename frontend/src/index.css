@@ -144,6 +144,14 @@ h1, h2, h3 { font-weight: 600; }
   z-index: 5;
 }
 
+.stereo-center-line {
+  position: absolute;
+  width: 0;
+  border-left: 2px dashed rgba(100, 200, 255, 0.7);
+  pointer-events: none;
+  z-index: 5;
+}
+
 .frame-nav {
   display: flex;
   align-items: center;
@@ -251,6 +259,8 @@ select {
 }
 
 .status-bar {
+  display: flex;
+  justify-content: space-between;
   padding: 6px 20px;
   background: var(--surface2);
   font-size: 12px;

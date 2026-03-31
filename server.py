@@ -156,6 +156,7 @@ class ExtractRequest(BaseModel):
     lpf: float = 13500.0
     overlap: float = 0.25
     reverse: bool = False
+    stereo: bool = False
 
 
 @app.post("/api/extract")
@@ -174,6 +175,7 @@ def extract(req: ExtractRequest):
         gamma=req.gamma, gain=req.gain, threshold=req.threshold,
         fps=req.fps, sample_rate=req.sample_rate,
         hpf=req.hpf, lpf=req.lpf, overlap=req.overlap,
+        stereo=req.stereo,
     )
     return Response(
         content=wav_bytes,

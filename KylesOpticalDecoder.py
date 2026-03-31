@@ -150,6 +150,19 @@ def extract_scanline_audio(corrected_img):
     return np.mean(corrected_img, axis=1)
 
 
+def extract_stereo_scanline_audio(corrected_img):
+    """Extract stereo audio from a corrected image.
+
+    Splits the image down the center column. The inner half (left side of image)
+    becomes the LEFT channel, the outer half (right side) becomes the RIGHT channel.
+    Returns (left_samples, right_samples).
+    """
+    mid = corrected_img.shape[1] // 2
+    left_ch = np.mean(corrected_img[:, :mid], axis=1)
+    right_ch = np.mean(corrected_img[:, mid:], axis=1)
+    return left_ch, right_ch
+
+
 # ---------------------------------------------------------------------------
 # Overlap stitching
 # ---------------------------------------------------------------------------
@@ -209,6 +222,54 @@ def stitch_with_overlap(frame_audio_list, max_overlap_frac):
         else:
             result = np.concatenate([result, curr])
 
+    return result
+
+
+def compute_overlap_offsets(frame_audio_list, max_overlap_frac):
+    """Compute the overlap offset for each consecutive frame pair.
+
+    Returns a list of offsets (length = len(frame_audio_list) - 1).
+    Uses the mono signal to determine alignment.
+    """
+    if len(frame_audio_list) < 2 or max_overlap_frac <= 0:
+        return [0] * max(0, len(frame_audio_list) - 1)
+
+    frame_len = len(frame_audio_list[0])
+    max_overlap = int(frame_len * max_overlap_frac)
+    offsets = []
+
+    # Build running tail for overlap detection
+    prev_tail = frame_audio_list[0].copy()
+    for i in range(1, len(frame_audio_list)):
+        curr = frame_audio_list[i]
+        offset = find_best_overlap(prev_tail, curr, max_overlap)
+        offsets.append(offset)
+        # Advance: the "result" tail after stitching this frame
+        if offset > 0:
+            prev_tail = curr  # after cross-fade, tail is curr
+        else:
+            prev_tail = curr
+    return offsets
+
+
+def apply_overlap_offsets(frame_audio_list, offsets):
+    """Stitch frames using pre-computed overlap offsets with cross-fade blending."""
+    if not frame_audio_list:
+        return np.array([], dtype=np.float64)
+    if len(frame_audio_list) == 1:
+        return frame_audio_list[0].copy()
+
+    result = frame_audio_list[0].copy()
+    for i in range(1, len(frame_audio_list)):
+        curr = frame_audio_list[i]
+        overlap = offsets[i - 1]
+        if overlap > 0:
+            fade_out = np.linspace(1.0, 0.0, overlap)
+            fade_in = np.linspace(0.0, 1.0, overlap)
+            blended = result[-overlap:] * fade_out + curr[:overlap] * fade_in
+            result = np.concatenate([result[:-overlap], blended, curr[overlap:]])
+        else:
+            result = np.concatenate([result, curr])
     return result
 
 
@@ -308,13 +369,15 @@ def extract_audio(input_dir, filenames, top, bottom, left, right,
                   rotate=0, negative=False, lift=0.0, gamma=1.0,
                   gain=1.0, threshold=0.0, fps=24.0, sample_rate=48000,
                   hpf=40.0, lpf=13500.0, overlap=0.25,
-                  progress_callback=None):
+                  stereo=False, progress_callback=None):
     """Run the full extraction pipeline. Returns (sample_rate, int16_array).
 
+    When *stereo* is True, returns a 2-channel int16 array (N, 2).
     *progress_callback*, if provided, is called with (current, total) after
     each frame is processed.
     """
-    all_samples = []
+    all_left = []
+    all_right = [] if stereo else None
     total = len(filenames)
 
     for idx, fname in enumerate(filenames):
@@ -325,34 +388,52 @@ def extract_audio(input_dir, filenames, top, bottom, left, right,
             img, top, bottom, left, right, rotate,
             negative, lift, gamma, gain, threshold,
         )
-        all_samples.append(extract_scanline_audio(corrected))
+        if stereo:
+            l_ch, r_ch = extract_stereo_scanline_audio(corrected)
+            all_left.append(l_ch)
+            all_right.append(r_ch)
+        else:
+            all_left.append(extract_scanline_audio(corrected))
         if progress_callback and ((idx + 1) % 20 == 0 or idx + 1 == total):
             progress_callback(idx + 1, total)
 
-    if not all_samples:
+    if not all_left:
         raise ValueError("No frames were successfully processed")
 
-    # Stitch
-    if overlap > 0 and len(all_samples) > 1:
-        raw_signal = stitch_with_overlap(all_samples, overlap)
+    # Compute overlap offsets once from mono (or left channel) for sample-accurate sync
+    if stereo and overlap > 0 and len(all_left) > 1:
+        # Use the average of L+R to find overlaps so both channels stay in sync
+        all_mono = [(l + r) / 2.0 for l, r in zip(all_left, all_right)]
+        offsets = compute_overlap_offsets(all_mono, overlap)
+    elif overlap > 0 and len(all_left) > 1:
+        offsets = None  # use standard stitch_with_overlap for mono
     else:
-        raw_signal = np.concatenate(all_samples)
+        offsets = None
 
-    native_rate = len(all_samples[0]) * fps
+    def _process_channel(all_samples, shared_offsets=None):
+        if shared_offsets is not None:
+            raw_signal = apply_overlap_offsets(all_samples, shared_offsets)
+        elif overlap > 0 and len(all_samples) > 1:
+            raw_signal = stitch_with_overlap(all_samples, overlap)
+        else:
+            raw_signal = np.concatenate(all_samples)
+        native_rate = len(all_samples[0]) * fps
+        target_n = int(len(raw_signal) * sample_rate / native_rate)
+        signal = resample(raw_signal, target_n)
+        signal = apply_lowpass(signal, lpf, sample_rate)
+        signal = apply_highpass(signal, hpf, sample_rate)
+        peak = np.max(np.abs(signal))
+        if peak > 0:
+            signal = signal / peak
+        return np.clip(signal * 32767, -32768, 32767).astype(np.int16)
 
-    # Resample
-    target_n = int(len(raw_signal) * sample_rate / native_rate)
-    signal = resample(raw_signal, target_n)
+    left_int16 = _process_channel(all_left, offsets)
+    if stereo:
+        right_int16 = _process_channel(all_right, offsets)
+        signal_int16 = np.column_stack([left_int16, right_int16])
+    else:
+        signal_int16 = left_int16
 
-    # Filters
-    signal = apply_lowpass(signal, lpf, sample_rate)
-    signal = apply_highpass(signal, hpf, sample_rate)
-
-    # Normalise to int16
-    peak = np.max(np.abs(signal))
-    if peak > 0:
-        signal = signal / peak
-    signal_int16 = np.clip(signal * 32767, -32768, 32767).astype(np.int16)
     return sample_rate, signal_int16
 
 
