@@ -5,6 +5,8 @@ to use to convert the audio. However, the codebase is in C++, and it is difficul
 Optical to Digital conversion tool, written in python, that can convert optical audio of all shapes and sizes (possibly other formats too like Dolby-Digital or SDDS) and Dolby A/SR easily and effectivly.
 Also, another important goal is that anyone can understand how the audio conversions work and can extend the functionality into their own projects too.
 
+![Cover Image](cover.png)
+
 ## Useful Links
 * Sound-on-film https://en.wikipedia.org/wiki/Sound-on-film
 * Dolby Stereo https://en.wikipedia.org/wiki/Dolby_Stereo
