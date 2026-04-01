@@ -63,6 +63,10 @@ python KylesOpticalDecoder.py --help
 ## Theory of Operation
 TODO
 
+## License
+This project is licensed under the GNU General Public License v3.0.
+See [LICENSE](LICENSE) for the full text.
+
 ### Contributors
 * Kyle Mikolajczyk
 * Will Dirkschka
