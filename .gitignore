@@ -2,3 +2,9 @@ venv/
 input/
 .vscode/
 output/
+*.wav
+debug_crops/
+docs/
+__pycache__/
+*.mov
+*.mp4
