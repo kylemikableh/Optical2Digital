@@ -463,7 +463,7 @@ function App() {
 
       {/* Header */}
       <div className="header">
-        <h1>Kyle's Optical Decoder</h1>
+        <h1>Optical2Digital</h1>
         {loaded && (
           <>
             <span className="project-info">{numFrames} frames • {frameWidth}×{frameHeight}</span>
