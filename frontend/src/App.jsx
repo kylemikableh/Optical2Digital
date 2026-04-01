@@ -121,6 +121,7 @@ function App() {
   const [extracting, setExtracting] = useState(false)
   const [status, setStatus] = useState('')
   const [extractProgress, setExtractProgress] = useState(null)
+  const wakeLockRef = useRef(null)
 
   // --- Load project ---
   const loadProject = useCallback(async () => {
@@ -191,6 +192,49 @@ function App() {
       rotate, negative, lift, gamma, gain, threshold,
       fps, sampleRate, hpf, lpf, overlap, reverse, stereo,
       startFrame, endFrame])
+
+  // Keep the screen awake on supported browsers while a project is loaded.
+  useEffect(() => {
+    if (!loaded || !('wakeLock' in navigator)) return
+
+    let disposed = false
+
+    const requestWakeLock = async () => {
+      if (document.visibilityState !== 'visible') return
+      if (wakeLockRef.current) return
+
+      try {
+        const sentinel = await navigator.wakeLock.request('screen')
+        if (disposed) {
+          await sentinel.release()
+          return
+        }
+
+        wakeLockRef.current = sentinel
+        sentinel.addEventListener('release', () => {
+          if (wakeLockRef.current === sentinel) wakeLockRef.current = null
+        })
+      } catch (err) {
+        // Wake Lock can fail due to policy, power mode, or browser support nuances.
+        console.warn('Wake Lock unavailable:', err)
+      }
+    }
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') requestWakeLock()
+    }
+
+    requestWakeLock()
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
+    return () => {
+      disposed = true
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      const sentinel = wakeLockRef.current
+      wakeLockRef.current = null
+      if (sentinel) sentinel.release().catch(() => {})
+    }
+  }, [loaded])
 
   // --- Image URLs (server returns already-rotated images) ---
   const rawUrl = loaded

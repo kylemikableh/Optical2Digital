@@ -21,7 +21,12 @@ Python CLI tool that can extract film optical audio
 - Python 3.10+
 - Node.js 18+
 
-### Setup
+### Setup (normal local)
+
+First time: `start-dev-fresh.sh`
+Afterwards: `start-dev.sh`
+
+### Setup (development)
 
 **Backend (Python):**
 ```bash
