@@ -2,6 +2,63 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 
 const API = ''  // proxied by vite in dev
 
+const SETTINGS_PREFIX = 'optical2digital:'
+
+/** Debounce URL changes and fetch images via AbortController so rapid
+ *  scrubbing / slider drags don't flood the server with stale requests. */
+function useDebouncedImageUrl(url, delay = 150) {
+  const [src, setSrc] = useState(null)
+  const abortRef = useRef(null)
+  const blobRef = useRef(null)
+
+  useEffect(() => {
+    if (!url) {
+      if (abortRef.current) abortRef.current.abort()
+      if (blobRef.current) URL.revokeObjectURL(blobRef.current)
+      blobRef.current = null
+      setSrc(null)
+      return
+    }
+
+    const timer = setTimeout(() => {
+      if (abortRef.current) abortRef.current.abort()
+      const ac = new AbortController()
+      abortRef.current = ac
+
+      fetch(url, { signal: ac.signal })
+        .then(r => r.blob())
+        .then(blob => {
+          if (ac.signal.aborted) return
+          const next = URL.createObjectURL(blob)
+          if (blobRef.current) URL.revokeObjectURL(blobRef.current)
+          blobRef.current = next
+          setSrc(next)
+        })
+        .catch(e => { if (e.name !== 'AbortError') console.error(e) })
+    }, delay)
+
+    return () => clearTimeout(timer)
+  }, [url, delay])
+
+  useEffect(() => () => {
+    if (abortRef.current) abortRef.current.abort()
+    if (blobRef.current) URL.revokeObjectURL(blobRef.current)
+  }, [])
+
+  return src
+}
+
+function saveSettings(path, settings) {
+  try { localStorage.setItem(SETTINGS_PREFIX + path, JSON.stringify(settings)) } catch {}
+}
+
+function loadSettings(path) {
+  try {
+    const raw = localStorage.getItem(SETTINGS_PREFIX + path)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
 function App() {
   // Project state
   const [loaded, setLoaded] = useState(false)
@@ -63,11 +120,35 @@ function App() {
       setFrameWidth(data.frame_width)
       setFrameHeight(data.frame_height)
       setFrameIndex(0)
-      if (data.fps) {
-        setFps(data.fps)
+
+      // Restore saved settings for this path, or use defaults
+      const saved = loadSettings(inputDir)
+      if (saved) {
+        setCropTop(saved.cropTop ?? 297)
+        setTrackHeight(saved.trackHeight ?? 3070)
+        setCropLeft(saved.cropLeft ?? 849)
+        setCropRight(saved.cropRight ?? 1191)
+        setRotate(saved.rotate ?? 0)
+        setNegative(saved.negative ?? false)
+        setLift(saved.lift ?? 0.0)
+        setGamma(saved.gamma ?? 1.0)
+        setGain(saved.gain ?? 1.0)
+        setThreshold(saved.threshold ?? 0.0)
+        setFps(saved.fps ?? data.fps ?? 24.0)
+        setSampleRate(saved.sampleRate ?? 48000)
+        setHpf(saved.hpf ?? 40.0)
+        setLpf(saved.lpf ?? 13500.0)
+        setOverlap(saved.overlap ?? 0.05)
+        setReverse(saved.reverse ?? false)
+        setStereo(saved.stereo ?? true)
+        setStartFrame(saved.startFrame ?? 0)
+        setEndFrame(saved.endFrame ?? data.num_frames - 1)
+      } else {
+        if (data.fps) setFps(data.fps)
+        setStartFrame(0)
+        setEndFrame(data.num_frames - 1)
       }
-      setStartFrame(0)
-      setEndFrame(data.num_frames - 1)
+
       setLoaded(true)
       setShowLoad(false)
       const label = data.fps ? 'video' : 'image sequence'
@@ -76,6 +157,20 @@ function App() {
       setLoadError(e.message)
     }
   }, [inputDir])
+
+  // --- Auto-save settings to localStorage whenever they change ---
+  useEffect(() => {
+    if (!loaded) return
+    saveSettings(inputDir, {
+      cropTop, trackHeight, cropLeft, cropRight,
+      rotate, negative, lift, gamma, gain, threshold,
+      fps, sampleRate, hpf, lpf, overlap, reverse, stereo,
+      startFrame, endFrame,
+    })
+  }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
+      rotate, negative, lift, gamma, gain, threshold,
+      fps, sampleRate, hpf, lpf, overlap, reverse, stereo,
+      startFrame, endFrame])
 
   // --- Image URLs (server returns already-rotated images) ---
   const rawUrl = loaded
@@ -88,6 +183,10 @@ function App() {
   const correctedUrl = loaded
     ? `${API}/api/frame/${frameIndex}/corrected?${correctedParams}`
     : null
+
+  // Debounced + abort-aware image sources
+  const rawSrc = useDebouncedImageUrl(rawUrl)
+  const correctedSrc = useDebouncedImageUrl(correctedUrl)
 
   // Screen dimensions after rotation
   const screenWidth = (rotate === 90 || rotate === 270) ? frameHeight : frameWidth
@@ -205,32 +304,52 @@ function App() {
         throw new Error(err.detail || 'Extraction failed')
       }
 
-      // Listen for SSE progress
+      // Listen for SSE progress (auto-reconnects on transient drops)
       await new Promise((resolve, reject) => {
-        const es = new EventSource(`${API}/api/extract/progress`)
-        es.onmessage = (ev) => {
-          const data = JSON.parse(ev.data)
-          setExtractProgress(data)
-          if (data.total > 0 && data.current < data.total) {
-            const pct = Math.round((data.current / data.total) * 100)
-            setStatus(`${data.phase}: ${data.current} / ${data.total} (${pct}%)`)
-            setFrameIndex(Math.min(data.current, numFrames - 1))
-          } else if (data.phase && !data.done) {
-            setStatus(`${data.phase}...`)
-          }
-          if (data.done) {
-            es.close()
-            if (data.error) {
-              reject(new Error(data.error))
-            } else {
-              resolve()
+        let resolved = false
+        const connect = () => {
+          const es = new EventSource(`${API}/api/extract/progress`)
+          es.onmessage = (ev) => {
+            const data = JSON.parse(ev.data)
+            setExtractProgress(data)
+            if (data.total > 0 && data.current < data.total) {
+              const pct = Math.round((data.current / data.total) * 100)
+              setStatus(`${data.phase}: ${data.current} / ${data.total} (${pct}%)`)
+              setFrameIndex(Math.min(data.current, numFrames - 1))
+            } else if (data.phase && !data.done) {
+              setStatus(`${data.phase}...`)
+            }
+            if (data.done) {
+              es.close()
+              if (!resolved) {
+                resolved = true
+                data.error ? reject(new Error(data.error)) : resolve()
+              }
             }
           }
+          es.onerror = () => {
+            es.close()
+            if (resolved) return
+            // Reconnect after a short delay — the job may still be running
+            setTimeout(() => {
+              if (resolved) return
+              // Check if job is still running before reconnecting
+              fetch(`${API}/api/extract/progress`)
+                .then(r => {
+                  if (!r.ok) throw new Error('Server gone')
+                  // If we got a response, reconnect the SSE stream
+                  connect()
+                })
+                .catch(() => {
+                  if (!resolved) {
+                    resolved = true
+                    reject(new Error('Lost connection to server'))
+                  }
+                })
+            }, 1000)
+          }
         }
-        es.onerror = () => {
-          es.close()
-          reject(new Error('Lost connection to server'))
-        }
+        connect()
       })
 
       // Download the result
@@ -376,12 +495,12 @@ function App() {
           <div className="crop-canvas">
             {loaded && rawUrl ? (
               <div className="image-wrapper">
-                <img ref={imgRef} src={rawUrl} alt={`Frame ${frameIndex}`} className="base-image" />
+                <img ref={imgRef} src={rawSrc} alt={`Frame ${frameIndex}`} className="base-image" />
                 {/* Corrected image clipped to crop region */}
-                <img
-                  src={correctedUrl} alt="" className="corrected-image"
+                {correctedSrc && <img
+                  src={correctedSrc} alt="" className="corrected-image"
                   style={{ clipPath: `inset(${topPct}% ${100 - rightPct}% ${100 - bottomPct}% ${leftPct}%)` }}
-                />
+                />}
                 {/* Overlap zones */}
                 {overlapPx > 0 && (
                   <>
