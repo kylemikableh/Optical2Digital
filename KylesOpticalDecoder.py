@@ -113,6 +113,14 @@ def parse_args():
         metavar="DIR",
         help="Save cropped soundtrack images to this directory for debugging",
     )
+    parser.add_argument(
+        "--soundtrack-color", type=parse_soundtrack_color_arg, default="B&W",
+        metavar="{B&W,High-Magenta,Cyan}",
+        help=(
+            "Soundtrack stock color type. For non-monochrome frames: "
+            "B&W/High-Magenta use GREEN channel; Cyan uses RED channel"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -357,6 +365,60 @@ def _chunked_resample(signal, target_n, chunk_seconds=30, sample_rate_hint=48000
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".dpx", ".exr"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
+SOUNDTRACK_COLOR_CHOICES = ("B&W", "High-Magenta", "Cyan")
+
+
+def parse_soundtrack_color_arg(value):
+    """Normalize CLI soundtrack-color values to canonical labels."""
+    raw = str(value).strip()
+    key = raw.lower().replace("_", "-")
+    if key in {"b&w", "bw", "blackwhite", "black-and-white"}:
+        return "B&W"
+    if key in {"high-magenta", "highmagenta", "magenta"}:
+        return "High-Magenta"
+    if key == "cyan":
+        return "Cyan"
+    raise argparse.ArgumentTypeError(
+        "Invalid --soundtrack-color value. Use one of: B&W, High-Magenta, Cyan"
+    )
+
+
+def select_soundtrack_channel(img, soundtrack_color="B&W"):
+    """Return a grayscale uint8 image for extraction based on soundtrack color rules.
+
+    Rules:
+      - If image is already monochrome, keep it as-is.
+      - Otherwise use GREEN for B&W and High-Magenta.
+      - Otherwise use RED for Cyan.
+    """
+    if img is None:
+        return None
+
+    if img.ndim == 2:
+        return img
+
+    if img.ndim == 3 and img.shape[2] == 1:
+        return img[:, :, 0]
+
+    if img.ndim != 3 or img.shape[2] < 3:
+        raise ValueError("Unsupported image format for soundtrack extraction")
+
+    b = img[:, :, 0]
+    g = img[:, :, 1]
+    r = img[:, :, 2]
+
+    # Treat tiny channel differences as monochrome (common with compressed video).
+    mono_like = (
+        np.max(cv2.absdiff(b, g)) <= 1
+        and np.max(cv2.absdiff(g, r)) <= 1
+        and np.max(cv2.absdiff(b, r)) <= 1
+    )
+    if mono_like:
+        return g
+
+    if soundtrack_color == "Cyan":
+        return r
+    return g
 
 
 # ---------------------------------------------------------------------------
@@ -371,10 +433,10 @@ class ImageSequenceSource:
         self._filenames = list_frames(input_dir)
         if not self._filenames:
             raise ValueError(f"No image files found in '{input_dir}'")
-        first = cv2.imread(os.path.join(input_dir, self._filenames[0]), cv2.IMREAD_GRAYSCALE)
+        first = cv2.imread(os.path.join(input_dir, self._filenames[0]), cv2.IMREAD_UNCHANGED)
         if first is None:
             raise RuntimeError(f"Could not read first frame: {self._filenames[0]}")
-        self._frame_height, self._frame_width = first.shape
+        self._frame_height, self._frame_width = first.shape[:2]
 
     @property
     def num_frames(self):
@@ -393,12 +455,12 @@ class ImageSequenceSource:
         return None
 
     def load_frame(self, index):
-        """Load frame by index as grayscale uint8 (or None)."""
+        """Load frame by index as uint8 image (grayscale or color) or None."""
         if index < 0 or index >= len(self._filenames):
             return None
         return cv2.imread(
             os.path.join(self._input_dir, self._filenames[index]),
-            cv2.IMREAD_GRAYSCALE,
+            cv2.IMREAD_UNCHANGED,
         )
 
 
@@ -433,7 +495,7 @@ class VideoSource:
         return self._fps
 
     def load_frame(self, index):
-        """Seek to *index* and return the frame as grayscale uint8 (or None)."""
+        """Seek to *index* and return the frame as uint8 image (or None)."""
         if index < 0 or index >= self._num_frames:
             return None
         with self._lock:
@@ -441,7 +503,7 @@ class VideoSource:
             ok, frame = self._cap.read()
         if not ok or frame is None:
             return None
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return frame
 
     def close(self):
         self._cap.release()
@@ -472,8 +534,8 @@ def list_frames(input_dir):
 
 
 def load_frame(input_dir, filename):
-    """Load a single frame as a grayscale uint8 numpy array (or None)."""
-    return cv2.imread(os.path.join(input_dir, filename), cv2.IMREAD_GRAYSCALE)
+    """Load a single frame as a uint8 numpy array (grayscale or color)."""
+    return cv2.imread(os.path.join(input_dir, filename), cv2.IMREAD_UNCHANGED)
 
 
 def rotate_image(img, degrees):
@@ -489,19 +551,22 @@ def rotate_image(img, degrees):
 
 def crop_and_correct(img, top, bottom, left, right, rotate=0,
                      negative=False, lift=0.0, gamma=1.0, gain=1.0,
-                     threshold=0.0):
-    """Crop, rotate, normalise and colour-correct a grayscale frame.
+                     threshold=0.0, soundtrack_color="B&W"):
+    """Crop, rotate, channel-select, normalise and colour-correct a frame.
 
     Returns the corrected image as a float64 array in [0, 1].
     """
     cropped = img[top:bottom, left:right]
+    cropped = select_soundtrack_channel(cropped, soundtrack_color)
     cropped = rotate_image(cropped, rotate)
     img_float = cropped.astype(np.float64) / 255.0
     return correct_image(img_float, negative, lift, gamma, gain, threshold)
 
 
-def correct_full_frame(img, negative=False, lift=0.0, gamma=1.0, gain=1.0, threshold=0.0):
+def correct_full_frame(img, negative=False, lift=0.0, gamma=1.0, gain=1.0,
+                       threshold=0.0, soundtrack_color="B&W"):
     """Apply corrections to the full frame (no crop/rotation). Returns float64 [0,1]."""
+    img = select_soundtrack_channel(img, soundtrack_color)
     img_float = img.astype(np.float64) / 255.0
     return correct_image(img_float, negative, lift, gamma, gain, threshold)
 
@@ -516,7 +581,7 @@ def corrected_to_jpeg(img_corrected):
 
 
 def frame_to_jpeg(img):
-    """Encode a raw grayscale uint8 image as JPEG bytes."""
+    """Encode a raw uint8 image (grayscale or color) as JPEG bytes."""
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         raise RuntimeError("JPEG encoding failed")
@@ -528,7 +593,8 @@ def extract_audio(source, top, bottom, left, right,
                   gain=1.0, threshold=0.0, fps=24.0, sample_rate=48000,
                   hpf=40.0, lpf=13500.0, overlap=0.25,
                   stereo=False, progress_callback=None, reverse=False,
-                  phase_callback=None, start_frame=0, end_frame=None):
+                  phase_callback=None, start_frame=0, end_frame=None,
+                  soundtrack_color="B&W"):
     """Run the full extraction pipeline. Returns (sample_rate, int16_array).
 
     *source* is a FrameSource object (ImageSequenceSource or VideoSource).
@@ -563,7 +629,7 @@ def extract_audio(source, top, bottom, left, right,
             continue
         corrected = crop_and_correct(
             img, top, bottom, left, right, rotate,
-            negative, lift, gamma, gain, threshold,
+            negative, lift, gamma, gain, threshold, soundtrack_color,
         )
         if stereo:
             l_ch, r_ch = extract_stereo_scanline_audio(corrected)
@@ -650,6 +716,7 @@ def main():
 
     top, bottom, left, right = args.crop
     print(f"Crop region: top={top} bottom={bottom} left={left} right={right}")
+    print(f"Soundtrack color mode: {args.soundtrack_color}")
 
     # --- Prepare crop dump directory if requested ---
     if args.dump_crops:
@@ -669,28 +736,19 @@ def main():
             print(f"  Warning: Could not read frame {frame_idx}, skipping.", file=sys.stderr)
             continue
 
-        # Crop to soundtrack region
-        img_cropped = img[top:bottom, left:right]
-
-        # Rotate if requested (clockwise)
-        if args.rotate == 90:
-            img_cropped = cv2.rotate(img_cropped, cv2.ROTATE_90_CLOCKWISE)
-        elif args.rotate == 180:
-            img_cropped = cv2.rotate(img_cropped, cv2.ROTATE_180)
-        elif args.rotate == 270:
-            img_cropped = cv2.rotate(img_cropped, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-        # Normalize to [0.0, 1.0]
-        img_float = img_cropped.astype(np.float64) / 255.0
-
-        # Apply image corrections
-        img_corrected = correct_image(
-            img_float,
+        img_corrected = crop_and_correct(
+            img,
+            top,
+            bottom,
+            left,
+            right,
+            rotate=args.rotate,
             negative=args.negative,
             lift=args.lift,
             gamma=args.gamma,
             gain=args.gain,
             threshold=args.threshold,
+            soundtrack_color=args.soundtrack_color,
         )
 
         # Dump cropped image if requested
