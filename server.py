@@ -29,6 +29,7 @@ import os
 import pathlib
 import threading
 import time
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -123,6 +124,7 @@ def get_corrected_frame(
     gamma: float = Query(1.0),
     gain: float = Query(1.0),
     threshold: float = Query(0.0),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
 ):
     """Return full frame with corrections applied (no crop), rotated, as JPEG."""
     _check_loaded()
@@ -132,7 +134,9 @@ def get_corrected_frame(
     img = source.load_frame(index)
     if img is None:
         raise HTTPException(500, f"Could not read frame {index}")
-    corrected = decoder.correct_full_frame(img, negative, lift, gamma, gain, threshold)
+    corrected = decoder.correct_full_frame(
+        img, negative, lift, gamma, gain, threshold, soundtrack_color
+    )
     corrected = decoder.rotate_image(corrected, rotate)
     return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
 
@@ -150,6 +154,7 @@ def get_preview_frame(
     gamma: float = Query(1.0),
     gain: float = Query(1.0),
     threshold: float = Query(0.0),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
 ):
     """Return a cropped+corrected frame as JPEG (for live preview)."""
     _check_loaded()
@@ -162,7 +167,7 @@ def get_preview_frame(
 
     corrected = decoder.crop_and_correct(
         img, top, bottom, left, right, rotate,
-        negative, lift, gamma, gain, threshold,
+        negative, lift, gamma, gain, threshold, soundtrack_color,
     )
     return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
 
@@ -183,6 +188,7 @@ class ExtractRequest(BaseModel):
     hpf: float = 40.0
     lpf: float = 13500.0
     overlap: float = 0.25
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = "B&W"
     reverse: bool = False
     stereo: bool = False
     start_frame: int = 0
@@ -228,6 +234,7 @@ def extract(req: ExtractRequest):
                 gamma=req.gamma, gain=req.gain, threshold=req.threshold,
                 fps=req.fps, sample_rate=req.sample_rate,
                 hpf=req.hpf, lpf=req.lpf, overlap=req.overlap,
+                soundtrack_color=req.soundtrack_color,
                 stereo=req.stereo, reverse=req.reverse,
                 start_frame=req.start_frame, end_frame=req.end_frame,
                 progress_callback=progress_cb,

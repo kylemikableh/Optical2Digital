@@ -79,6 +79,11 @@ function loadSettings(path) {
   } catch { return null }
 }
 
+function soundtrackChannelLabel(soundtrackColor) {
+  if (soundtrackColor === 'Cyan') return 'RED channel (non-monochrome frames)'
+  return 'GREEN channel (non-monochrome frames)'
+}
+
 function App() {
   // Project state
   const [loaded, setLoaded] = useState(false)
@@ -110,6 +115,7 @@ function App() {
   const [hpf, setHpf] = useState(40.0)
   const [lpf, setLpf] = useState(13500.0)
   const [overlap, setOverlap] = useState(0.05)
+  const [soundtrackColor, setSoundtrackColor] = useState('B&W')
   const [reverse, setReverse] = useState(false)
   const [stereo, setStereo] = useState(true)
   const [startFrame, setStartFrame] = useState(0)
@@ -160,6 +166,7 @@ function App() {
         setHpf(saved.hpf ?? 40.0)
         setLpf(saved.lpf ?? 13500.0)
         setOverlap(saved.overlap ?? 0.05)
+        setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
         setReverse(saved.reverse ?? false)
         setStereo(saved.stereo ?? true)
         setStartFrame(saved.startFrame ?? 0)
@@ -185,12 +192,12 @@ function App() {
     saveSettings(inputDir, {
       cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative, lift, gamma, gain, threshold,
-      fps, sampleRate, hpf, lpf, overlap, reverse, stereo,
+      fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo,
       startFrame, endFrame,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative, lift, gamma, gain, threshold,
-      fps, sampleRate, hpf, lpf, overlap, reverse, stereo,
+      fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo,
       startFrame, endFrame])
 
   // Keep the screen awake on supported browsers while a project is loaded.
@@ -242,7 +249,7 @@ function App() {
     : null
 
   const correctedParams = new URLSearchParams({
-    rotate, negative, lift, gamma, gain, threshold,
+    rotate, negative, lift, gamma, gain, threshold, soundtrack_color: soundtrackColor,
   }).toString()
   const correctedUrl = loaded
     ? `${API}/api/frame/${frameIndex}/corrected?${correctedParams}`
@@ -358,6 +365,7 @@ function App() {
           top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
           rotate, negative, lift, gamma, gain, threshold,
           fps, sample_rate: sampleRate, hpf, lpf, overlap, reverse,
+          soundtrack_color: soundtrackColor,
           stereo,
           start_frame: startFrame,
           end_frame: endFrame,
@@ -436,7 +444,7 @@ function App() {
       setExtracting(false)
       setExtractProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
 
   return (
     <div className="app">
@@ -524,6 +532,14 @@ function App() {
               <SliderInput label="HPF (Hz)" value={hpf} onChange={setHpf} min={0} max={500} step={1} />
               <SliderInput label="LPF (Hz)" value={lpf} onChange={setLpf} min={1000} max={24000} step={100} />
               <SliderInput label="Overlap" value={overlap} onChange={setOverlap} min={0} max={0.5} step={0.01} />
+              <div className="control-row">
+                <label>Soundtrack Color</label>
+                <select value={soundtrackColor} onChange={e => setSoundtrackColor(e.target.value)}>
+                  <option value="B&W">B&W</option>
+                  <option value="High-Magenta">High-Magenta</option>
+                  <option value="Cyan">Cyan</option>
+                </select>
+              </div>
               <div className="checkbox-row">
                 <input type="checkbox" id="rev" checked={reverse} onChange={e => setReverse(e.target.checked)} />
                 <label htmlFor="rev">Reverse frame order</label>
@@ -543,6 +559,9 @@ function App() {
             <button className="btn-primary" onClick={handleExtract} disabled={!loaded || extracting}>
               {extracting ? 'Extracting...' : 'Extract Audio'}
             </button>
+            <p className="hint" style={{ marginTop: 8 }}>
+              Channel in use: {soundtrackChannelLabel(soundtrackColor)}
+            </p>
             {extracting && extractProgress && extractProgress.total > 0 && (
               <div className="progress-bar">
                 <div
