@@ -89,6 +89,30 @@ def parse_args():
         help="S-curve steepness for variable-area edge sharpening (0 = disabled)",
     )
     parser.add_argument(
+        "--dmin-value", type=float, default=None,
+        help="Fixed Dmin value in [0,1] used for normalization (overrides percentile estimation)",
+    )
+    parser.add_argument(
+        "--dmin-percentile", type=float, default=99.5,
+        help="Percentile used to estimate Dmin from the cropped track",
+    )
+    parser.add_argument(
+        "--dmin-headroom", type=float, default=0.2,
+        help="Value subtracted after Dmin normalization to leave headroom",
+    )
+    parser.add_argument(
+        "--binary-mask", action="store_true",
+        help="Apply OpenCV binary threshold mask after Dmin normalization",
+    )
+    parser.add_argument(
+        "--binary-lb", type=int, default=96,
+        help="Lower threshold (0-255) for binary mask",
+    )
+    parser.add_argument(
+        "--binary-ub", type=int, default=255,
+        help="Upper output value (0-255) for binary mask",
+    )
+    parser.add_argument(
         "--reverse", action="store_true",
         help="Reverse the frame order before extraction",
     )
@@ -162,6 +186,52 @@ def correct_image(img_float, negative, lift, gamma, gain, threshold):
         img = np.power(img, s) / (half_s + np.power(img, s))
 
     return img
+
+
+def normalize_track_by_dmin(img_float, dmin_percentile=99.5, dmin_headroom=0.2, dmin_value=None):
+    """Normalize track image by Dmin estimate and apply headroom offset.
+
+    Dmin is estimated from a bright-point percentile in the cropped track image,
+    then the full image is divided by Dmin so clear aperture maps near 1.0.
+    A small headroom value is subtracted to reduce sensitivity to drift/noise.
+    """
+    if img_float.size == 0:
+        return img_float
+
+    if dmin_value is not None:
+        dmin = float(dmin_value)
+    else:
+        dmin = np.percentile(img_float, np.clip(dmin_percentile, 0.0, 100.0))
+    dmin = max(float(dmin), 1e-6)
+    normalized = img_float / dmin
+    normalized -= dmin_headroom
+    return np.clip(normalized, 0.0, 1.0)
+
+
+def estimate_dmin_from_track_center(img, top, bottom, left, right, rotate=0,
+                                    soundtrack_color="B&W"):
+    """Estimate Dmin from the center pixel of the cropped soundtrack area."""
+    cropped = img[top:bottom, left:right]
+    if cropped.size == 0:
+        raise ValueError("Invalid crop region for Dmin estimation")
+    cropped = select_soundtrack_channel(cropped, soundtrack_color)
+    cropped = rotate_image(cropped, rotate)
+    h, w = cropped.shape[:2]
+    cy = h // 2
+    cx = w // 2
+    dmin_u8 = int(cropped[cy, cx])
+    dmin = max(dmin_u8 / 255.0, 1e-6)
+    return dmin, cx, cy, dmin_u8
+
+
+def apply_binary_mask_threshold(img_float, negative, binary_lb=96, binary_ub=255):
+    """Apply OpenCV binary threshold on a [0,1] float image and return [0,1]."""
+    lb = int(np.clip(binary_lb, 0, 255))
+    ub = int(np.clip(binary_ub, 0, 255))
+    img_u8 = np.clip(img_float * 255.0, 0, 255).astype(np.uint8)
+    thresh_type = cv2.THRESH_BINARY_INV if negative else cv2.THRESH_BINARY
+    _, mask_u8 = cv2.threshold(img_u8, lb, ub, thresh_type)
+    return mask_u8.astype(np.float64) / 255.0
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +621,10 @@ def rotate_image(img, degrees):
 
 def crop_and_correct(img, top, bottom, left, right, rotate=0,
                      negative=False, lift=0.0, gamma=1.0, gain=1.0,
-                     threshold=0.0, soundtrack_color="B&W"):
+                     threshold=0.0, soundtrack_color="B&W",
+                     dmin_percentile=99.5, dmin_headroom=0.2,
+                     binary_mask=False, binary_lb=96, binary_ub=255,
+                     dmin_value=None):
     """Crop, rotate, channel-select, normalise and colour-correct a frame.
 
     Returns the corrected image as a float64 array in [0, 1].
@@ -560,15 +633,30 @@ def crop_and_correct(img, top, bottom, left, right, rotate=0,
     cropped = select_soundtrack_channel(cropped, soundtrack_color)
     cropped = rotate_image(cropped, rotate)
     img_float = cropped.astype(np.float64) / 255.0
-    return correct_image(img_float, negative, lift, gamma, gain, threshold)
+    corrected = correct_image(img_float, negative, lift, gamma, gain, threshold)
+    normalized = normalize_track_by_dmin(
+        corrected, dmin_percentile, dmin_headroom, dmin_value
+    )
+    if binary_mask:
+        return apply_binary_mask_threshold(normalized, negative, binary_lb, binary_ub)
+    return normalized
 
 
 def correct_full_frame(img, negative=False, lift=0.0, gamma=1.0, gain=1.0,
-                       threshold=0.0, soundtrack_color="B&W"):
+                       threshold=0.0, soundtrack_color="B&W",
+                       dmin_percentile=99.5, dmin_headroom=0.2,
+                       binary_mask=False, binary_lb=96, binary_ub=255,
+                       dmin_value=None):
     """Apply corrections to the full frame (no crop/rotation). Returns float64 [0,1]."""
     img = select_soundtrack_channel(img, soundtrack_color)
     img_float = img.astype(np.float64) / 255.0
-    return correct_image(img_float, negative, lift, gamma, gain, threshold)
+    corrected = correct_image(img_float, negative, lift, gamma, gain, threshold)
+    normalized = normalize_track_by_dmin(
+        corrected, dmin_percentile, dmin_headroom, dmin_value
+    )
+    if binary_mask:
+        return apply_binary_mask_threshold(normalized, negative, binary_lb, binary_ub)
+    return normalized
 
 
 def corrected_to_jpeg(img_corrected):
@@ -594,7 +682,9 @@ def extract_audio(source, top, bottom, left, right,
                   hpf=40.0, lpf=13500.0, overlap=0.25,
                   stereo=False, progress_callback=None, reverse=False,
                   phase_callback=None, start_frame=0, end_frame=None,
-                  soundtrack_color="B&W"):
+                  soundtrack_color="B&W", dmin_percentile=99.5,
+                  dmin_headroom=0.2, binary_mask=False,
+                  binary_lb=96, binary_ub=255, dmin_value=None):
     """Run the full extraction pipeline. Returns (sample_rate, int16_array).
 
     *source* is a FrameSource object (ImageSequenceSource or VideoSource).
@@ -630,6 +720,8 @@ def extract_audio(source, top, bottom, left, right,
         corrected = crop_and_correct(
             img, top, bottom, left, right, rotate,
             negative, lift, gamma, gain, threshold, soundtrack_color,
+            dmin_percentile, dmin_headroom, binary_mask, binary_lb, binary_ub,
+            dmin_value,
         )
         if stereo:
             l_ch, r_ch = extract_stereo_scanline_audio(corrected)
@@ -717,6 +809,12 @@ def main():
     top, bottom, left, right = args.crop
     print(f"Crop region: top={top} bottom={bottom} left={left} right={right}")
     print(f"Soundtrack color mode: {args.soundtrack_color}")
+    print(
+        f"Dmin normalize: value={args.dmin_value if args.dmin_value is not None else 'auto'}, "
+        f"p{args.dmin_percentile:.1f}, "
+        f"headroom={args.dmin_headroom:.3f}, "
+        f"binary_mask={args.binary_mask} (lb={args.binary_lb}, ub={args.binary_ub})"
+    )
 
     # --- Prepare crop dump directory if requested ---
     if args.dump_crops:
@@ -749,6 +847,12 @@ def main():
             gain=args.gain,
             threshold=args.threshold,
             soundtrack_color=args.soundtrack_color,
+            dmin_percentile=args.dmin_percentile,
+            dmin_headroom=args.dmin_headroom,
+            binary_mask=args.binary_mask,
+            binary_lb=args.binary_lb,
+            binary_ub=args.binary_ub,
+            dmin_value=args.dmin_value,
         )
 
         # Dump cropped image if requested

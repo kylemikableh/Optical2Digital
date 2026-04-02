@@ -125,6 +125,12 @@ def get_corrected_frame(
     gain: float = Query(1.0),
     threshold: float = Query(0.0),
     soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    dmin_percentile: float = Query(99.5),
+    dmin_value: float | None = Query(None),
+    dmin_headroom: float = Query(0.2),
+    binary_mask: bool = Query(False),
+    binary_lb: int = Query(96),
+    binary_ub: int = Query(255),
 ):
     """Return full frame with corrections applied (no crop), rotated, as JPEG."""
     _check_loaded()
@@ -135,7 +141,8 @@ def get_corrected_frame(
     if img is None:
         raise HTTPException(500, f"Could not read frame {index}")
     corrected = decoder.correct_full_frame(
-        img, negative, lift, gamma, gain, threshold, soundtrack_color
+        img, negative, lift, gamma, gain, threshold, soundtrack_color,
+        dmin_percentile, dmin_headroom, binary_mask, binary_lb, binary_ub, dmin_value,
     )
     corrected = decoder.rotate_image(corrected, rotate)
     return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
@@ -155,6 +162,12 @@ def get_preview_frame(
     gain: float = Query(1.0),
     threshold: float = Query(0.0),
     soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    dmin_percentile: float = Query(99.5),
+    dmin_value: float | None = Query(None),
+    dmin_headroom: float = Query(0.2),
+    binary_mask: bool = Query(False),
+    binary_lb: int = Query(96),
+    binary_ub: int = Query(255),
 ):
     """Return a cropped+corrected frame as JPEG (for live preview)."""
     _check_loaded()
@@ -168,8 +181,41 @@ def get_preview_frame(
     corrected = decoder.crop_and_correct(
         img, top, bottom, left, right, rotate,
         negative, lift, gamma, gain, threshold, soundtrack_color,
+        dmin_percentile, dmin_headroom, binary_mask, binary_lb, binary_ub, dmin_value,
     )
     return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
+
+
+@app.get("/api/frame/{index}/estimate-dmin")
+def estimate_dmin(
+    index: int,
+    top: int = Query(0),
+    bottom: int = Query(0),
+    left: int = Query(0),
+    right: int = Query(0),
+    rotate: int = Query(0),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+):
+    """Estimate Dmin from the center of the cropped soundtrack region."""
+    _check_loaded()
+    source = _state["source"]
+    if index < 0 or index >= source.num_frames:
+        raise HTTPException(404, f"Frame index {index} out of range (0–{source.num_frames - 1})")
+    img = source.load_frame(index)
+    if img is None:
+        raise HTTPException(500, f"Could not read frame {index}")
+    try:
+        dmin, center_x, center_y, center_u8 = decoder.estimate_dmin_from_track_center(
+            img, top, bottom, left, right, rotate, soundtrack_color
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {
+        "dmin": dmin,
+        "center_x": center_x,
+        "center_y": center_y,
+        "center_u8": center_u8,
+    }
 
 
 class ExtractRequest(BaseModel):
@@ -183,6 +229,12 @@ class ExtractRequest(BaseModel):
     gamma: float = 1.0
     gain: float = 1.0
     threshold: float = 0.0
+    dmin_percentile: float = 99.5
+    dmin_value: float | None = None
+    dmin_headroom: float = 0.2
+    binary_mask: bool = False
+    binary_lb: int = 96
+    binary_ub: int = 255
     fps: float = 24.0
     sample_rate: int = 48000
     hpf: float = 40.0
@@ -232,6 +284,12 @@ def extract(req: ExtractRequest):
                 top=req.top, bottom=req.bottom, left=req.left, right=req.right,
                 rotate=req.rotate, negative=req.negative, lift=req.lift,
                 gamma=req.gamma, gain=req.gain, threshold=req.threshold,
+                dmin_percentile=req.dmin_percentile,
+                dmin_value=req.dmin_value,
+                dmin_headroom=req.dmin_headroom,
+                binary_mask=req.binary_mask,
+                binary_lb=req.binary_lb,
+                binary_ub=req.binary_ub,
                 fps=req.fps, sample_rate=req.sample_rate,
                 hpf=req.hpf, lpf=req.lpf, overlap=req.overlap,
                 soundtrack_color=req.soundtrack_color,

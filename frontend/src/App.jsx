@@ -108,6 +108,11 @@ function App() {
   const [gamma, setGamma] = useState(1.0)
   const [gain, setGain] = useState(1.0)
   const [threshold, setThreshold] = useState(0.0)
+  const [dminValue, setDminValue] = useState(1.0)
+  const [dminHeadroom, setDminHeadroom] = useState(0.2)
+  const [binaryMask, setBinaryMask] = useState(false)
+  const [binaryLb, setBinaryLb] = useState(96)
+  const [binaryUb, setBinaryUb] = useState(255)
 
   // Extraction settings
   const [fps, setFps] = useState(24.0)
@@ -161,6 +166,11 @@ function App() {
         setGamma(saved.gamma ?? 1.0)
         setGain(saved.gain ?? 1.0)
         setThreshold(saved.threshold ?? 0.0)
+        setDminValue(saved.dminValue ?? 1.0)
+        setDminHeadroom(saved.dminHeadroom ?? 0.2)
+        setBinaryMask(saved.binaryMask ?? false)
+        setBinaryLb(saved.binaryLb ?? 96)
+        setBinaryUb(saved.binaryUb ?? 255)
         setFps(saved.fps ?? data.fps ?? 24.0)
         setSampleRate(saved.sampleRate ?? 48000)
         setHpf(saved.hpf ?? 40.0)
@@ -192,11 +202,13 @@ function App() {
     saveSettings(inputDir, {
       cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative, lift, gamma, gain, threshold,
+      dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb,
       fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo,
       startFrame, endFrame,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative, lift, gamma, gain, threshold,
+      dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb,
       fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo,
       startFrame, endFrame])
 
@@ -249,7 +261,18 @@ function App() {
     : null
 
   const correctedParams = new URLSearchParams({
-    rotate, negative, lift, gamma, gain, threshold, soundtrack_color: soundtrackColor,
+    rotate,
+    negative,
+    lift,
+    gamma,
+    gain,
+    threshold,
+    soundtrack_color: soundtrackColor,
+    dmin_value: dminValue,
+    dmin_headroom: dminHeadroom,
+    binary_mask: binaryMask,
+    binary_lb: binaryLb,
+    binary_ub: binaryUb,
   }).toString()
   const correctedUrl = loaded
     ? `${API}/api/frame/${frameIndex}/corrected?${correctedParams}`
@@ -352,6 +375,31 @@ function App() {
   }, [dragState, screenWidth, screenHeight, trackHeight])
 
   // --- Extract ---
+  const handleEstimateDmin = useCallback(async () => {
+    if (!loaded) return
+    try {
+      const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
+      const params = new URLSearchParams({
+        top: imgCrop.top,
+        bottom: imgCrop.bottom,
+        left: imgCrop.left,
+        right: imgCrop.right,
+        rotate,
+        soundtrack_color: soundtrackColor,
+      }).toString()
+      const res = await fetch(`${API}/api/frame/${frameIndex}/estimate-dmin?${params}`)
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Failed to estimate Dmin')
+      }
+      const data = await res.json()
+      setDminValue(Number(data.dmin))
+      setStatus(`Estimated Dmin=${Number(data.dmin).toFixed(4)} from center pixel (${data.center_x}, ${data.center_y})`) 
+    } catch (e) {
+      setStatus(`Error estimating Dmin: ${e.message}`)
+    }
+  }, [loaded, cropTop, cropBottom, cropLeft, cropRight, rotate, soundtrackColor, frameIndex])
+
   const handleExtract = useCallback(async () => {
     setExtracting(true)
     setExtractProgress(null)
@@ -364,6 +412,11 @@ function App() {
         body: JSON.stringify({
           top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
           rotate, negative, lift, gamma, gain, threshold,
+          dmin_value: dminValue,
+          dmin_headroom: dminHeadroom,
+          binary_mask: binaryMask,
+          binary_lb: binaryLb,
+          binary_ub: binaryUb,
           fps, sample_rate: sampleRate, hpf, lpf, overlap, reverse,
           soundtrack_color: soundtrackColor,
           stereo,
@@ -444,7 +497,7 @@ function App() {
       setExtracting(false)
       setExtractProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
 
   return (
     <div className="app">
@@ -520,6 +573,17 @@ function App() {
               <SliderInput label="Gamma" value={gamma} onChange={setGamma} min={0.1} max={5} step={0.05} />
               <SliderInput label="Gain" value={gain} onChange={setGain} min={0} max={5} step={0.05} />
               <SliderInput label="S-Curve" value={threshold} onChange={setThreshold} min={0} max={20} step={0.5} />
+              <NumberInput label="Dmin Value" value={dminValue} onChange={setDminValue} min={0.001} max={2.0} step={0.001} />
+              <button className="btn-secondary btn-small" onClick={handleEstimateDmin} disabled={!loaded || extracting}>
+                Estimate Dmin (Center)
+              </button>
+              <SliderInput label="Dmin Headroom" value={dminHeadroom} onChange={setDminHeadroom} min={0} max={0.5} step={0.01} />
+              <div className="checkbox-row">
+                <input type="checkbox" id="binary-mask" checked={binaryMask} onChange={e => setBinaryMask(e.target.checked)} />
+                <label htmlFor="binary-mask">Binary mask cleanup</label>
+              </div>
+              <NumberInput label="Binary LB" value={binaryLb} onChange={setBinaryLb} min={0} max={255} />
+              <NumberInput label="Binary UB" value={binaryUb} onChange={setBinaryUb} min={0} max={255} />
             </div>
           </section>
 
