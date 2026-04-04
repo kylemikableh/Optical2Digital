@@ -120,10 +120,6 @@ def get_corrected_frame(
     index: int,
     rotate: int = Query(0),
     negative: bool = Query(False),
-    lift: float = Query(0.0),
-    gamma: float = Query(1.0),
-    gain: float = Query(1.0),
-    threshold: float = Query(0.0),
     soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
     dmin_percentile: float = Query(99.5),
     dmin_value: float | None = Query(None),
@@ -141,8 +137,15 @@ def get_corrected_frame(
     if img is None:
         raise HTTPException(500, f"Could not read frame {index}")
     corrected = decoder.correct_full_frame(
-        img, negative, lift, gamma, gain, threshold, soundtrack_color,
-        dmin_percentile, dmin_headroom, binary_mask, binary_lb, binary_ub, dmin_value,
+        img,
+        negative=negative,
+        soundtrack_color=soundtrack_color,
+        dmin_percentile=dmin_percentile,
+        dmin_headroom=dmin_headroom,
+        binary_mask=binary_mask,
+        binary_lb=binary_lb,
+        binary_ub=binary_ub,
+        dmin_value=dmin_value,
     )
     corrected = decoder.rotate_image(corrected, rotate)
     return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
@@ -157,10 +160,6 @@ def get_preview_frame(
     right: int = Query(0),
     rotate: int = Query(0),
     negative: bool = Query(False),
-    lift: float = Query(0.0),
-    gamma: float = Query(1.0),
-    gain: float = Query(1.0),
-    threshold: float = Query(0.0),
     soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
     dmin_percentile: float = Query(99.5),
     dmin_value: float | None = Query(None),
@@ -179,9 +178,20 @@ def get_preview_frame(
         raise HTTPException(500, f"Could not read frame {index}")
 
     corrected = decoder.crop_and_correct(
-        img, top, bottom, left, right, rotate,
-        negative, lift, gamma, gain, threshold, soundtrack_color,
-        dmin_percentile, dmin_headroom, binary_mask, binary_lb, binary_ub, dmin_value,
+        img,
+        top,
+        bottom,
+        left,
+        right,
+        rotate=rotate,
+        negative=negative,
+        soundtrack_color=soundtrack_color,
+        dmin_percentile=dmin_percentile,
+        dmin_headroom=dmin_headroom,
+        binary_mask=binary_mask,
+        binary_lb=binary_lb,
+        binary_ub=binary_ub,
+        dmin_value=dmin_value,
     )
     return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
 
@@ -194,9 +204,12 @@ def estimate_dmin(
     left: int = Query(0),
     right: int = Query(0),
     rotate: int = Query(0),
+    negative: bool = Query(False),
     soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    sample_x: int | None = Query(None),
+    sample_y: int | None = Query(None),
 ):
-    """Estimate Dmin from the center of the cropped soundtrack region."""
+    """Estimate Dmin from the crop center or a user-selected point."""
     _check_loaded()
     source = _state["source"]
     if index < 0 or index >= source.num_frames:
@@ -205,16 +218,19 @@ def estimate_dmin(
     if img is None:
         raise HTTPException(500, f"Could not read frame {index}")
     try:
-        dmin, center_x, center_y, center_u8 = decoder.estimate_dmin_from_track_center(
-            img, top, bottom, left, right, rotate, soundtrack_color
+        dmin, point_x, point_y, point_u8 = decoder.estimate_dmin_from_track_point(
+            img, top, bottom, left, right, rotate, soundtrack_color, sample_x, sample_y, negative
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {
         "dmin": dmin,
-        "center_x": center_x,
-        "center_y": center_y,
-        "center_u8": center_u8,
+        "point_x": point_x,
+        "point_y": point_y,
+        "point_u8": point_u8,
+        "center_x": point_x,
+        "center_y": point_y,
+        "center_u8": point_u8,
     }
 
 
@@ -225,10 +241,6 @@ class ExtractRequest(BaseModel):
     right: int
     rotate: int = 0
     negative: bool = False
-    lift: float = 0.0
-    gamma: float = 1.0
-    gain: float = 1.0
-    threshold: float = 0.0
     dmin_percentile: float = 99.5
     dmin_value: float | None = None
     dmin_headroom: float = 0.2
@@ -281,20 +293,28 @@ def extract(req: ExtractRequest):
 
             wav_bytes = decoder.extract_audio_to_wav_bytes(
                 source,
-                top=req.top, bottom=req.bottom, left=req.left, right=req.right,
-                rotate=req.rotate, negative=req.negative, lift=req.lift,
-                gamma=req.gamma, gain=req.gain, threshold=req.threshold,
+                top=req.top,
+                bottom=req.bottom,
+                left=req.left,
+                right=req.right,
+                rotate=req.rotate,
+                negative=req.negative,
                 dmin_percentile=req.dmin_percentile,
                 dmin_value=req.dmin_value,
                 dmin_headroom=req.dmin_headroom,
                 binary_mask=req.binary_mask,
                 binary_lb=req.binary_lb,
                 binary_ub=req.binary_ub,
-                fps=req.fps, sample_rate=req.sample_rate,
-                hpf=req.hpf, lpf=req.lpf, overlap=req.overlap,
+                fps=req.fps,
+                sample_rate=req.sample_rate,
+                hpf=req.hpf,
+                lpf=req.lpf,
+                overlap=req.overlap,
                 soundtrack_color=req.soundtrack_color,
-                stereo=req.stereo, reverse=req.reverse,
-                start_frame=req.start_frame, end_frame=req.end_frame,
+                stereo=req.stereo,
+                reverse=req.reverse,
+                start_frame=req.start_frame,
+                end_frame=req.end_frame,
                 progress_callback=progress_cb,
                 phase_callback=phase_cb,
             )
