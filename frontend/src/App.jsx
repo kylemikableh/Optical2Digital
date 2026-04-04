@@ -104,10 +104,6 @@ function App() {
   // Corrections
   const [rotate, setRotate] = useState(0)
   const [negative, setNegative] = useState(false)
-  const [lift, setLift] = useState(0.0)
-  const [gamma, setGamma] = useState(1.0)
-  const [gain, setGain] = useState(1.0)
-  const [threshold, setThreshold] = useState(0.0)
   const [dminValue, setDminValue] = useState(1.0)
   const [dminHeadroom, setDminHeadroom] = useState(0.2)
   const [binaryMask, setBinaryMask] = useState(false)
@@ -123,6 +119,7 @@ function App() {
   const [soundtrackColor, setSoundtrackColor] = useState('B&W')
   const [reverse, setReverse] = useState(false)
   const [stereo, setStereo] = useState(true)
+  const [showStereoGuides, setShowStereoGuides] = useState(true)
   const [startFrame, setStartFrame] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
 
@@ -132,6 +129,8 @@ function App() {
   const [extracting, setExtracting] = useState(false)
   const [status, setStatus] = useState('')
   const [extractProgress, setExtractProgress] = useState(null)
+  const [pickingDmin, setPickingDmin] = useState(false)
+  const [dminPickPoint, setDminPickPoint] = useState(null)
   const wakeLockRef = useRef(null)
 
   // --- Load project ---
@@ -162,10 +161,6 @@ function App() {
         setCropRight(saved.cropRight ?? 1191)
         setRotate(saved.rotate ?? 0)
         setNegative(saved.negative ?? false)
-        setLift(saved.lift ?? 0.0)
-        setGamma(saved.gamma ?? 1.0)
-        setGain(saved.gain ?? 1.0)
-        setThreshold(saved.threshold ?? 0.0)
         setDminValue(saved.dminValue ?? 1.0)
         setDminHeadroom(saved.dminHeadroom ?? 0.2)
         setBinaryMask(saved.binaryMask ?? false)
@@ -179,6 +174,7 @@ function App() {
         setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
         setReverse(saved.reverse ?? false)
         setStereo(saved.stereo ?? true)
+        setShowStereoGuides(saved.showStereoGuides ?? true)
         setStartFrame(saved.startFrame ?? 0)
         setEndFrame(saved.endFrame ?? data.num_frames - 1)
       } else {
@@ -201,16 +197,21 @@ function App() {
     if (!loaded) return
     saveSettings(inputDir, {
       cropTop, trackHeight, cropLeft, cropRight,
-      rotate, negative, lift, gamma, gain, threshold,
+      rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb,
-      fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo,
+      fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, showStereoGuides,
       startFrame, endFrame,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
-      rotate, negative, lift, gamma, gain, threshold,
+      rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb,
-      fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo,
+      fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, showStereoGuides,
       startFrame, endFrame])
+
+  useEffect(() => {
+    setDminPickPoint(null)
+    setPickingDmin(false)
+  }, [frameIndex])
 
   // Keep the screen awake on supported browsers while a project is loaded.
   useEffect(() => {
@@ -263,10 +264,6 @@ function App() {
   const correctedParams = new URLSearchParams({
     rotate,
     negative,
-    lift,
-    gamma,
-    gain,
-    threshold,
     soundtrack_color: soundtrackColor,
     dmin_value: dminValue,
     dmin_headroom: dminHeadroom,
@@ -299,6 +296,9 @@ function App() {
   const bottomPct = screenHeight > 0 ? (cropBottom / screenHeight * 100) : 0
   const leftPct = screenWidth > 0 ? (cropLeft / screenWidth * 100) : 0
   const rightPct = screenWidth > 0 ? (cropRight / screenWidth * 100) : 0
+  const stereoMidPct = (leftPct + rightPct) / 2
+  const stereoLeftGuidePct = leftPct + ((rightPct - leftPct) / 4)
+  const stereoRightGuidePct = leftPct + (((rightPct - leftPct) * 3) / 4)
 
   // Overlap zone percentages
   const overlapTopPct = screenHeight > 0 ? (overlapTopY / screenHeight * 100) : 0
@@ -375,35 +375,73 @@ function App() {
   }, [dragState, screenWidth, screenHeight, trackHeight])
 
   // --- Extract ---
-  const handleEstimateDmin = useCallback(async () => {
-    if (!loaded) return
+  const handleEstimateDmin = useCallback(() => {
+    if (!loaded || extracting) return
+    setPickingDmin((active) => {
+      const next = !active
+      setStatus(next
+        ? 'DMIN picker active — click a point inside the crop region.'
+        : 'DMIN picker cancelled.')
+      return next
+    })
+  }, [loaded, extracting])
+
+  const handlePreviewClick = useCallback(async (e) => {
+    if (!pickingDmin || !loaded || !imgRef.current) return
+
+    const rect = imgRef.current.getBoundingClientRect()
+    const relX = e.clientX - rect.left
+    const relY = e.clientY - rect.top
+    if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) return
+
+    const screenX = Math.round((relX / rect.width) * screenWidth)
+    const screenY = Math.round((relY / rect.height) * screenHeight)
+
+    if (screenX < cropLeft || screenX > cropRight || screenY < cropTop || screenY > cropBottom) {
+      setStatus('Click inside the soundtrack crop region to sample DMIN.')
+      return
+    }
+
     try {
       const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
+      const sampleX = Math.max(0, Math.min(Math.round(screenX - cropLeft), Math.max(cropRight - cropLeft - 1, 0)))
+      const sampleY = Math.max(0, Math.min(Math.round(screenY - cropTop), Math.max(cropBottom - cropTop - 1, 0)))
       const params = new URLSearchParams({
         top: imgCrop.top,
         bottom: imgCrop.bottom,
         left: imgCrop.left,
         right: imgCrop.right,
         rotate,
+        negative,
         soundtrack_color: soundtrackColor,
+        sample_x: sampleX,
+        sample_y: sampleY,
       }).toString()
       const res = await fetch(`${API}/api/frame/${frameIndex}/estimate-dmin?${params}`)
       if (!res.ok) {
         const err = await res.json()
-        throw new Error(err.detail || 'Failed to estimate Dmin')
+        throw new Error(err.detail || 'Failed to estimate DMIN')
       }
       const data = await res.json()
       setDminValue(Number(data.dmin))
-      setStatus(`Estimated Dmin=${Number(data.dmin).toFixed(4)} from center pixel (${data.center_x}, ${data.center_y})`) 
+      setDminPickPoint({ x: screenX, y: screenY })
+      setPickingDmin(false)
+      setStatus(`Estimated DMIN=${Number(data.dmin).toFixed(4)} from picked point (${data.point_x}, ${data.point_y})`)
     } catch (e) {
-      setStatus(`Error estimating Dmin: ${e.message}`)
+      setPickingDmin(false)
+      setStatus(`Error estimating DMIN: ${e.message}`)
     }
-  }, [loaded, cropTop, cropBottom, cropLeft, cropRight, rotate, soundtrackColor, frameIndex])
+  }, [pickingDmin, loaded, cropTop, cropBottom, cropLeft, cropRight, rotate, soundtrackColor, frameIndex, screenWidth, screenHeight])
 
   const handleExtract = useCallback(async () => {
     setExtracting(true)
     setExtractProgress(null)
-    setStatus('Starting extraction...')
+
+    const rangeStart = Math.max(0, Math.min(startFrame, endFrame))
+    const rangeEnd = Math.min(numFrames - 1, Math.max(startFrame, endFrame))
+    setFrameIndex(reverse ? rangeEnd : rangeStart)
+    setStatus(`Starting extraction for frames ${rangeStart}-${rangeEnd}...`)
+
     try {
       const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
       const res = await fetch(`${API}/api/extract`, {
@@ -411,7 +449,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
-          rotate, negative, lift, gamma, gain, threshold,
+          rotate, negative,
           dmin_value: dminValue,
           dmin_headroom: dminHeadroom,
           binary_mask: binaryMask,
@@ -437,12 +475,19 @@ function App() {
           es.onmessage = (ev) => {
             const data = JSON.parse(ev.data)
             setExtractProgress(data)
+
+            const completed = Math.max(0, Math.min(data.current ?? 0, data.total ?? 0))
+            const currentFrame = reverse
+              ? Math.max(rangeStart, rangeEnd - Math.max(completed - 1, 0))
+              : Math.min(rangeEnd, rangeStart + Math.max(completed - 1, 0))
+
             if (data.total > 0 && data.current < data.total) {
-              const pct = Math.round((data.current / data.total) * 100)
-              setStatus(`${data.phase}: ${data.current} / ${data.total} (${pct}%)`)
-              setFrameIndex(Math.min(data.current, numFrames - 1))
+              const pct = Math.round((completed / data.total) * 100)
+              setStatus(`${data.phase}: frame ${currentFrame} of range ${rangeStart}-${rangeEnd} • ${completed} / ${data.total} (${pct}%)`)
+              setFrameIndex(currentFrame)
             } else if (data.phase && !data.done) {
-              setStatus(`${data.phase}...`)
+              setStatus(`${data.phase}: frame ${currentFrame} of range ${rangeStart}-${rangeEnd}...`)
+              setFrameIndex(currentFrame)
             }
             if (data.done) {
               es.close()
@@ -497,7 +542,7 @@ function App() {
       setExtracting(false)
       setExtractProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
 
   return (
     <div className="app">
@@ -569,14 +614,13 @@ function App() {
                 <input type="checkbox" id="neg" checked={negative} onChange={e => setNegative(e.target.checked)} />
                 <label htmlFor="neg">Negative inversion</label>
               </div>
-              <SliderInput label="Lift" value={lift} onChange={setLift} min={-1} max={1} step={0.01} />
-              <SliderInput label="Gamma" value={gamma} onChange={setGamma} min={0.1} max={5} step={0.05} />
-              <SliderInput label="Gain" value={gain} onChange={setGain} min={0} max={5} step={0.05} />
-              <SliderInput label="S-Curve" value={threshold} onChange={setThreshold} min={0} max={20} step={0.5} />
               <NumberInput label="Dmin Value" value={dminValue} onChange={setDminValue} min={0.001} max={2.0} step={0.001} />
               <button className="btn-secondary btn-small" onClick={handleEstimateDmin} disabled={!loaded || extracting}>
-                Estimate Dmin (Center)
+                {pickingDmin ? 'Cancel DMIN Picker' : 'Pick DMIN from Image'}
               </button>
+              {pickingDmin && (
+                <p className="hint">Click inside the crop region to sample DMIN.</p>
+              )}
               <SliderInput label="Dmin Headroom" value={dminHeadroom} onChange={setDminHeadroom} min={0} max={0.5} step={0.01} />
               <div className="checkbox-row">
                 <input type="checkbox" id="binary-mask" checked={binaryMask} onChange={e => setBinaryMask(e.target.checked)} />
@@ -612,6 +656,10 @@ function App() {
                 <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
                 <label htmlFor="stereo">Stereo (split L/R)</label>
               </div>
+              <div className="checkbox-row">
+                <input type="checkbox" id="stereo-guides" checked={showStereoGuides} onChange={e => setShowStereoGuides(e.target.checked)} />
+                <label htmlFor="stereo-guides">Show Centerlines</label>
+              </div>
               <NumberInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} />
               <NumberInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} />
             </div>
@@ -641,7 +689,11 @@ function App() {
         <div className="preview-area">
           <div className="crop-canvas">
             {loaded && rawUrl ? (
-              <div className="image-wrapper">
+              <div
+                className="image-wrapper"
+                onClick={handlePreviewClick}
+                style={{ cursor: pickingDmin ? 'crosshair' : undefined }}
+              >
                 <img ref={imgRef} src={rawSrc} alt={`Frame ${frameIndex}`} className="base-image" />
                 {/* Corrected image clipped to crop region */}
                 {correctedSrc && <img
@@ -669,23 +721,64 @@ function App() {
                 {/* Frame boundary lines — full width */}
                 <div className="frame-line" style={{ top: `${topPct}%` }} />
                 <div className="frame-line" style={{ top: `${bottomPct}%` }} />
-                {/* Stereo center line */}
+                {/* Channel guide lines */}
                 {stereo && (
                   <div className="stereo-center-line" style={{
-                    top: `${topPct}%`, left: `${(leftPct + rightPct) / 2}%`,
+                    top: `${topPct}%`, left: `${stereoMidPct}%`,
                     height: `${bottomPct - topPct}%`,
                   }} />
+                )}
+                {showStereoGuides && (
+                  <>
+                    {stereo ? (
+                      <>
+                        <div className="stereo-guide-line" style={{
+                          top: `${topPct}%`, left: `${stereoLeftGuidePct}%`,
+                          height: `${bottomPct - topPct}%`,
+                        }} />
+                        <div className="stereo-guide-line" style={{
+                          top: `${topPct}%`, left: `${stereoRightGuidePct}%`,
+                          height: `${bottomPct - topPct}%`,
+                        }} />
+                      </>
+                    ) : (
+                      <div className="stereo-guide-line" style={{
+                        top: `${topPct}%`, left: `${stereoMidPct}%`,
+                        height: `${bottomPct - topPct}%`,
+                      }} />
+                    )}
+                  </>
                 )}
                 {/* Crop border */}
                 <div className="crop-border" style={{
                   top: `${topPct}%`, left: `${leftPct}%`,
                   width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%`,
                 }} />
+                {dminPickPoint && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: `${(dminPickPoint.y / screenHeight) * 100}%`,
+                      left: `${(dminPickPoint.x / screenWidth) * 100}%`,
+                      width: 14,
+                      height: 14,
+                      borderRadius: '50%',
+                      border: '2px solid #ffd166',
+                      boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.65)',
+                      transform: 'translate(-50%, -50%)',
+                      pointerEvents: 'none',
+                    }}
+                  />
+                )}
                 {/* Draggable move area */}
                 <div
                   className="crop-move-area"
                   style={{ top: `${topPct}%`, left: `${leftPct}%`, width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%` }}
-                  onMouseDown={e => { e.preventDefault(); setDragState({ type: 'move', startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight }) }}
+                  onMouseDown={e => {
+                    if (pickingDmin) return
+                    e.preventDefault()
+                    setDragState({ type: 'move', startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight })
+                  }}
                 />
                 {/* Corner + edge drag handles — vertical handles move box, horizontal resize width */}
                 {[
@@ -701,7 +794,12 @@ function App() {
                   <div
                     key={h.type} className="crop-handle"
                     style={{ top: `${h.top}%`, left: `${h.left}%`, transform: 'translate(-50%, -50%)', cursor: h.cursor }}
-                    onMouseDown={e => { e.preventDefault(); e.stopPropagation(); setDragState({ type: h.type, startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight }) }}
+                    onMouseDown={e => {
+                      if (pickingDmin) return
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setDragState({ type: h.type, startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight })
+                    }}
                   />
                 ))}
               </div>

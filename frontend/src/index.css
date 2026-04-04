@@ -164,10 +164,18 @@ h1, h2, h3 { font-weight: 600; }
   z-index: 5;
 }
 
+.stereo-guide-line {
+  position: absolute;
+  width: 0;
+  border-left: 2px dashed rgba(72, 220, 120, 0.85);
+  pointer-events: none;
+  z-index: 5;
+}
+
 .stereo-center-line {
   position: absolute;
   width: 0;
-  border-left: 2px dashed rgba(100, 200, 255, 0.7);
+  border-left: 2px dashed rgba(233, 69, 96, 0.85);
   pointer-events: none;
   z-index: 5;
 }

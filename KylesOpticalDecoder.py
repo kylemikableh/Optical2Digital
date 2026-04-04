@@ -22,7 +22,7 @@ Kyle's Optical Decoder - Optical Film Soundtrack to WAV Extractor
 Extracts audio from scanned motion picture film optical soundtracks (variable-area):
   1. Load scanned frame images
   2. Crop to soundtrack region
-  3. Apply image corrections (negative inversion, lift, gamma, gain, S-curve)
+  3. Apply image corrections (negative inversion, Dmin normalization, binary mask cleanup)
   4. Extract audio via scanline luminance averaging
   5. Resample to target sample rate
   6. Apply Butterworth HPF (DC bias removal) + LPF (anti-aliasing)
@@ -71,22 +71,6 @@ def parse_args():
     parser.add_argument(
         "--negative", action="store_true",
         help="Invert the image (for negative film scans)",
-    )
-    parser.add_argument(
-        "--lift", type=float, default=0.0,
-        help="Black point shift (added to pixel values after optional inversion)",
-    )
-    parser.add_argument(
-        "--gamma", type=float, default=1.0,
-        help="Gamma correction exponent (applied after lift)",
-    )
-    parser.add_argument(
-        "--gain", type=float, default=1.0,
-        help="Brightness multiplier (applied after gamma)",
-    )
-    parser.add_argument(
-        "--threshold", type=float, default=0.0,
-        help="S-curve steepness for variable-area edge sharpening (0 = disabled)",
     )
     parser.add_argument(
         "--dmin-value", type=float, default=None,
@@ -152,39 +136,14 @@ def parse_args():
 # Image correction
 # ---------------------------------------------------------------------------
 
-def correct_image(img_float, negative, lift, gamma, gain, threshold):
-    """Apply image corrections to a floating-point image [0,1]."""
+def correct_image(img_float, negative):
+    """Apply the remaining image corrections to a floating-point image [0,1]."""
     img = img_float.copy()
 
-    # 1. Negative inversion
     if negative:
         img = 1.0 - img
 
-    # 2. Lift (black point shift)
-    if lift != 0.0:
-        img += lift
-
-    # 3. Clamp
     np.clip(img, 0.0, 1.0, out=img)
-
-    # 4. Gamma
-    if gamma != 1.0:
-        img = np.power(img, gamma)
-
-    # 5. Gain
-    if gain != 1.0:
-        img *= gain
-
-    # 6. Clamp
-    np.clip(img, 0.0, 1.0, out=img)
-
-    # 7. S-curve threshold for VA edge sharpening
-    #    Formula borrowed from AEO-Light: x^s / (0.5^s + x^s)
-    if threshold > 0.0:
-        s = threshold
-        half_s = np.power(0.5, s)
-        img = np.power(img, s) / (half_s + np.power(img, s))
-
     return img
 
 
@@ -208,20 +167,40 @@ def normalize_track_by_dmin(img_float, dmin_percentile=99.5, dmin_headroom=0.2, 
     return np.clip(normalized, 0.0, 1.0)
 
 
-def estimate_dmin_from_track_center(img, top, bottom, left, right, rotate=0,
-                                    soundtrack_color="B&W"):
-    """Estimate Dmin from the center pixel of the cropped soundtrack area."""
+def estimate_dmin_from_track_point(img, top, bottom, left, right, rotate=0,
+                                   soundtrack_color="B&W", sample_x=None, sample_y=None,
+                                   negative=False):
+    """Estimate Dmin from a selected pixel in the cropped soundtrack area.
+
+    If *sample_x* and *sample_y* are omitted, the center of the cropped region
+    is used. The sampled value honors the negative-inversion setting so the
+    picker matches what the user sees in the preview.
+    """
     cropped = img[top:bottom, left:right]
     if cropped.size == 0:
         raise ValueError("Invalid crop region for Dmin estimation")
     cropped = select_soundtrack_channel(cropped, soundtrack_color)
     cropped = rotate_image(cropped, rotate)
     h, w = cropped.shape[:2]
-    cy = h // 2
-    cx = w // 2
-    dmin_u8 = int(cropped[cy, cx])
-    dmin = max(dmin_u8 / 255.0, 1e-6)
+    if sample_x is None or sample_y is None:
+        cx = w // 2
+        cy = h // 2
+    else:
+        cx = int(np.clip(sample_x, 0, max(w - 1, 0)))
+        cy = int(np.clip(sample_y, 0, max(h - 1, 0)))
+
+    corrected = correct_image(cropped.astype(np.float64) / 255.0, negative)
+    dmin = max(float(corrected[cy, cx]), 1e-6)
+    dmin_u8 = int(np.clip(round(dmin * 255.0), 0, 255))
     return dmin, cx, cy, dmin_u8
+
+
+def estimate_dmin_from_track_center(img, top, bottom, left, right, rotate=0,
+                                    soundtrack_color="B&W", negative=False):
+    """Backward-compatible wrapper for center-point Dmin estimation."""
+    return estimate_dmin_from_track_point(
+        img, top, bottom, left, right, rotate, soundtrack_color, None, None, negative
+    )
 
 
 def apply_binary_mask_threshold(img_float, negative, binary_lb=96, binary_ub=255):
@@ -620,12 +599,11 @@ def rotate_image(img, degrees):
 
 
 def crop_and_correct(img, top, bottom, left, right, rotate=0,
-                     negative=False, lift=0.0, gamma=1.0, gain=1.0,
-                     threshold=0.0, soundtrack_color="B&W",
+                     negative=False, soundtrack_color="B&W",
                      dmin_percentile=99.5, dmin_headroom=0.2,
                      binary_mask=False, binary_lb=96, binary_ub=255,
                      dmin_value=None):
-    """Crop, rotate, channel-select, normalise and colour-correct a frame.
+    """Crop, rotate, channel-select, and prepare a frame for extraction.
 
     Returns the corrected image as a float64 array in [0, 1].
     """
@@ -633,7 +611,7 @@ def crop_and_correct(img, top, bottom, left, right, rotate=0,
     cropped = select_soundtrack_channel(cropped, soundtrack_color)
     cropped = rotate_image(cropped, rotate)
     img_float = cropped.astype(np.float64) / 255.0
-    corrected = correct_image(img_float, negative, lift, gamma, gain, threshold)
+    corrected = correct_image(img_float, negative)
     normalized = normalize_track_by_dmin(
         corrected, dmin_percentile, dmin_headroom, dmin_value
     )
@@ -642,15 +620,14 @@ def crop_and_correct(img, top, bottom, left, right, rotate=0,
     return normalized
 
 
-def correct_full_frame(img, negative=False, lift=0.0, gamma=1.0, gain=1.0,
-                       threshold=0.0, soundtrack_color="B&W",
+def correct_full_frame(img, negative=False, soundtrack_color="B&W",
                        dmin_percentile=99.5, dmin_headroom=0.2,
                        binary_mask=False, binary_lb=96, binary_ub=255,
                        dmin_value=None):
     """Apply corrections to the full frame (no crop/rotation). Returns float64 [0,1]."""
     img = select_soundtrack_channel(img, soundtrack_color)
     img_float = img.astype(np.float64) / 255.0
-    corrected = correct_image(img_float, negative, lift, gamma, gain, threshold)
+    corrected = correct_image(img_float, negative)
     normalized = normalize_track_by_dmin(
         corrected, dmin_percentile, dmin_headroom, dmin_value
     )
@@ -677,8 +654,7 @@ def frame_to_jpeg(img):
 
 
 def extract_audio(source, top, bottom, left, right,
-                  rotate=0, negative=False, lift=0.0, gamma=1.0,
-                  gain=1.0, threshold=0.0, fps=24.0, sample_rate=48000,
+                  rotate=0, negative=False, fps=24.0, sample_rate=48000,
                   hpf=40.0, lpf=13500.0, overlap=0.25,
                   stereo=False, progress_callback=None, reverse=False,
                   phase_callback=None, start_frame=0, end_frame=None,
@@ -718,10 +694,20 @@ def extract_audio(source, top, bottom, left, right,
         if img is None:
             continue
         corrected = crop_and_correct(
-            img, top, bottom, left, right, rotate,
-            negative, lift, gamma, gain, threshold, soundtrack_color,
-            dmin_percentile, dmin_headroom, binary_mask, binary_lb, binary_ub,
-            dmin_value,
+            img,
+            top,
+            bottom,
+            left,
+            right,
+            rotate=rotate,
+            negative=negative,
+            soundtrack_color=soundtrack_color,
+            dmin_percentile=dmin_percentile,
+            dmin_headroom=dmin_headroom,
+            binary_mask=binary_mask,
+            binary_lb=binary_lb,
+            binary_ub=binary_ub,
+            dmin_value=dmin_value,
         )
         if stereo:
             l_ch, r_ch = extract_stereo_scanline_audio(corrected)
@@ -842,10 +828,6 @@ def main():
             right,
             rotate=args.rotate,
             negative=args.negative,
-            lift=args.lift,
-            gamma=args.gamma,
-            gain=args.gain,
-            threshold=args.threshold,
             soundtrack_color=args.soundtrack_color,
             dmin_percentile=args.dmin_percentile,
             dmin_headroom=args.dmin_headroom,
