@@ -120,17 +120,21 @@ function App() {
   const [reverse, setReverse] = useState(false)
   const [stereo, setStereo] = useState(true)
   const [showStereoGuides, setShowStereoGuides] = useState(true)
+  const [showZoom, setShowZoom] = useState(true)
+  const [zoomLevel, setZoomLevel] = useState(6)
   const [startFrame, setStartFrame] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
 
   // Crop overlay interaction
   const imgRef = useRef(null)
+  const importSettingsRef = useRef(null)
   const [dragState, setDragState] = useState(null)
   const [extracting, setExtracting] = useState(false)
   const [status, setStatus] = useState('')
   const [extractProgress, setExtractProgress] = useState(null)
   const [pickingDmin, setPickingDmin] = useState(false)
   const [dminPickPoint, setDminPickPoint] = useState(null)
+  const [hoverZoom, setHoverZoom] = useState(null)
   const wakeLockRef = useRef(null)
 
   // --- Load project ---
@@ -175,6 +179,8 @@ function App() {
         setReverse(saved.reverse ?? false)
         setStereo(saved.stereo ?? true)
         setShowStereoGuides(saved.showStereoGuides ?? true)
+        setShowZoom(saved.showZoom ?? true)
+        setZoomLevel(saved.zoomLevel ?? 6)
         setStartFrame(saved.startFrame ?? 0)
         setEndFrame(saved.endFrame ?? data.num_frames - 1)
       } else {
@@ -200,18 +206,25 @@ function App() {
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb,
       fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, showStereoGuides,
+      showZoom, zoomLevel,
       startFrame, endFrame,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb,
       fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, showStereoGuides,
+      showZoom, zoomLevel,
       startFrame, endFrame])
 
   useEffect(() => {
     setDminPickPoint(null)
     setPickingDmin(false)
+    setHoverZoom(null)
   }, [frameIndex])
+
+  useEffect(() => {
+    if (!showZoom) setHoverZoom(null)
+  }, [showZoom])
 
   // Keep the screen awake on supported browsers while a project is loaded.
   useEffect(() => {
@@ -303,6 +316,34 @@ function App() {
   // Overlap zone percentages
   const overlapTopPct = screenHeight > 0 ? (overlapTopY / screenHeight * 100) : 0
   const overlapBottomPct = screenHeight > 0 ? (overlapBottomY / screenHeight * 100) : 0
+  const zoomPanelSize = 220
+  const zoomFocusSize = Math.max(18, Math.min(90, zoomPanelSize / Math.max(zoomLevel, 1)))
+  const zoomPanelMargin = 12
+  const zoomPanelOffset = 24
+  const zoomPanelLeft = hoverZoom
+    ? Math.min(
+        Math.max(
+          hoverZoom.relX + zoomPanelOffset + zoomPanelSize <= hoverZoom.renderedWidth
+            ? hoverZoom.relX + zoomPanelOffset
+            : hoverZoom.relX - zoomPanelSize - zoomPanelOffset,
+          zoomPanelMargin,
+        ),
+        Math.max(zoomPanelMargin, hoverZoom.renderedWidth - zoomPanelSize - zoomPanelMargin),
+      )
+    : zoomPanelMargin
+  const zoomPanelTop = hoverZoom
+    ? Math.min(
+        Math.max(
+          hoverZoom.relY + zoomPanelOffset + zoomPanelSize <= hoverZoom.renderedHeight
+            ? hoverZoom.relY + zoomPanelOffset
+            : hoverZoom.relY - zoomPanelSize - zoomPanelOffset,
+          zoomPanelMargin,
+        ),
+        Math.max(zoomPanelMargin, hoverZoom.renderedHeight - zoomPanelSize - zoomPanelMargin),
+      )
+    : zoomPanelMargin
+  const zoomTranslateX = hoverZoom ? (zoomPanelSize / 2) - (hoverZoom.relX * zoomLevel) : 0
+  const zoomTranslateY = hoverZoom ? (zoomPanelSize / 2) - (hoverZoom.relY * zoomLevel) : 0
 
   // Convert screen-space crop to image-space crop for API calls
   function screenToImageCrop(sTop, sBot, sLeft, sRight) {
@@ -314,6 +355,101 @@ function App() {
       default:  return { top: sTop, bottom: sBot, left: sLeft, right: sRight }
     }
   }
+
+  const handleExportSettings = useCallback(() => {
+    const payload = {
+      app: 'Optical2Digital',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      inputDir,
+      settings: {
+        cropTop,
+        trackHeight,
+        cropLeft,
+        cropRight,
+        rotate,
+        negative,
+        dminValue,
+        dminHeadroom,
+        binaryMask,
+        binaryLb,
+        binaryUb,
+        fps,
+        sampleRate,
+        hpf,
+        lpf,
+        overlap,
+        soundtrackColor,
+        reverse,
+        stereo,
+        showStereoGuides,
+        showZoom,
+        zoomLevel,
+        startFrame,
+        endFrame,
+      },
+    }
+
+    const safeBase = (inputDir.split(/[\\/]/).filter(Boolean).pop() || 'optical2digital')
+      .replace(/[^a-z0-9._-]+/gi, '_')
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${safeBase}-settings.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    setStatus(`Saved settings file: ${safeBase}-settings.json`)
+  }, [inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
+
+  const handleImportSettingsFile = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    try {
+      const text = await file.text()
+      const payload = JSON.parse(text)
+      const saved = payload?.settings ?? payload
+      if (!saved || typeof saved !== 'object') {
+        throw new Error('Invalid settings file')
+      }
+
+      if (!loaded && typeof payload?.inputDir === 'string' && payload.inputDir.trim()) {
+        setInputDir(payload.inputDir)
+      }
+
+      const maxFrame = Math.max(numFrames - 1, 0)
+      setCropTop(Number(saved.cropTop ?? 297))
+      setTrackHeight(Number(saved.trackHeight ?? 3070))
+      setCropLeft(Number(saved.cropLeft ?? 849))
+      setCropRight(Number(saved.cropRight ?? 1191))
+      setRotate(Number(saved.rotate ?? 0))
+      setNegative(Boolean(saved.negative ?? false))
+      setDminValue(Number(saved.dminValue ?? 1.0))
+      setDminHeadroom(Number(saved.dminHeadroom ?? 0.2))
+      setBinaryMask(Boolean(saved.binaryMask ?? false))
+      setBinaryLb(Number(saved.binaryLb ?? 96))
+      setBinaryUb(Number(saved.binaryUb ?? 255))
+      setFps(Number(saved.fps ?? 24.0))
+      setSampleRate(Number(saved.sampleRate ?? 48000))
+      setHpf(Number(saved.hpf ?? 40.0))
+      setLpf(Number(saved.lpf ?? 13500.0))
+      setOverlap(Number(saved.overlap ?? 0.05))
+      setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
+      setReverse(Boolean(saved.reverse ?? false))
+      setStereo(Boolean(saved.stereo ?? true))
+      setShowStereoGuides(Boolean(saved.showStereoGuides ?? true))
+      setShowZoom(Boolean(saved.showZoom ?? true))
+      setZoomLevel(Number(saved.zoomLevel ?? 6))
+      setStartFrame(Math.max(0, Math.min(Number(saved.startFrame ?? 0), maxFrame)))
+      setEndFrame(Math.max(0, Math.min(Number(saved.endFrame ?? maxFrame), maxFrame)))
+      setStatus(`Loaded settings from ${file.name}`)
+    } catch (err) {
+      setStatus(`Error loading settings: ${err.message}`)
+    } finally {
+      e.target.value = ''
+    }
+  }, [loaded, numFrames])
 
   // --- Crop drag handling ---
   useEffect(() => {
@@ -373,6 +509,34 @@ function App() {
       document.body.style.userSelect = ''
     }
   }, [dragState, screenWidth, screenHeight, trackHeight])
+
+  const handlePreviewMouseMove = useCallback((e) => {
+    if (!showZoom || !imgRef.current) return
+
+    const rect = imgRef.current.getBoundingClientRect()
+    const relX = e.clientX - rect.left
+    const relY = e.clientY - rect.top
+    if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) {
+      setHoverZoom(null)
+      return
+    }
+
+    const screenX = Math.round((relX / Math.max(rect.width, 1)) * Math.max(screenWidth - 1, 0))
+    const screenY = Math.round((relY / Math.max(rect.height, 1)) * Math.max(screenHeight - 1, 0))
+
+    setHoverZoom({
+      relX,
+      relY,
+      renderedWidth: rect.width,
+      renderedHeight: rect.height,
+      screenX,
+      screenY,
+    })
+  }, [showZoom, screenWidth, screenHeight])
+
+  const handlePreviewMouseLeave = useCallback(() => {
+    setHoverZoom(null)
+  }, [])
 
   // --- Extract ---
   const handleEstimateDmin = useCallback(() => {
@@ -573,7 +737,15 @@ function App() {
         {loaded && (
           <>
             <span className="project-info">{numFrames} frames • {frameWidth}×{frameHeight}</span>
-            <button className="btn-secondary btn-small" onClick={() => setShowLoad(true)}>Change</button>
+            <div className="header-actions">
+              <button className="btn-secondary btn-small" onClick={handleExportSettings}>
+                Save Settings
+              </button>
+              <button className="btn-secondary btn-small" onClick={() => importSettingsRef.current?.click()}>
+                Load Settings
+              </button>
+              <button className="btn-secondary btn-small" onClick={() => setShowLoad(true)}>Change</button>
+            </div>
           </>
         )}
       </div>
@@ -589,8 +761,21 @@ function App() {
               <NumberInput label="Track Height" value={trackHeight} onChange={setTrackHeight} min={10} max={screenHeight} />
               <NumberInput label="Left" value={cropLeft} onChange={setCropLeft} min={0} max={screenWidth} />
               <NumberInput label="Right" value={cropRight} onChange={setCropRight} min={0} max={screenWidth} />
+              <div className="checkbox-row">
+                <input type="checkbox" id="show-zoom" checked={showZoom} onChange={e => setShowZoom(e.target.checked)} />
+                <label htmlFor="show-zoom">Show Hover Zoom</label>
+              </div>
+              <SliderInput label="Zoom ×" value={zoomLevel} onChange={setZoomLevel} min={2} max={12} step={0.5} />
             </div>
           </section>
+
+          <input
+            ref={importSettingsRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleImportSettingsFile}
+            style={{ display: 'none' }}
+          />
 
           {/* Rotation */}
           <section>
@@ -692,6 +877,8 @@ function App() {
               <div
                 className="image-wrapper"
                 onClick={handlePreviewClick}
+                onMouseMove={handlePreviewMouseMove}
+                onMouseLeave={handlePreviewMouseLeave}
                 style={{ cursor: pickingDmin ? 'crosshair' : undefined }}
               >
                 <img ref={imgRef} src={rawSrc} alt={`Frame ${frameIndex}`} className="base-image" />
@@ -754,6 +941,115 @@ function App() {
                   top: `${topPct}%`, left: `${leftPct}%`,
                   width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%`,
                 }} />
+                {showZoom && hoverZoom && rawSrc && (
+                  <>
+                    <div
+                      className="zoom-focus-box"
+                      style={{
+                        top: `${(hoverZoom.screenY / Math.max(screenHeight, 1)) * 100}%`,
+                        left: `${(hoverZoom.screenX / Math.max(screenWidth, 1)) * 100}%`,
+                        width: `${zoomFocusSize}px`,
+                        height: `${zoomFocusSize}px`,
+                      }}
+                    />
+                    <div
+                      className="zoom-panel"
+                      style={{
+                        left: `${zoomPanelLeft}px`,
+                        top: `${zoomPanelTop}px`,
+                      }}
+                    >
+                      <div
+                        className="zoom-scene"
+                        style={{
+                          width: `${hoverZoom.renderedWidth}px`,
+                          height: `${hoverZoom.renderedHeight}px`,
+                          transform: `translate(${zoomTranslateX}px, ${zoomTranslateY}px) scale(${zoomLevel})`,
+                        }}
+                      >
+                        <img src={rawSrc} alt="" className="zoom-image" />
+                        {correctedSrc && (
+                          <img
+                            src={correctedSrc}
+                            alt=""
+                            className="corrected-image"
+                            style={{ clipPath: `inset(${topPct}% ${100 - rightPct}% ${100 - bottomPct}% ${leftPct}%)` }}
+                          />
+                        )}
+                        {overlapPx > 0 && (
+                          <>
+                            <div className="overlap-zone" style={{
+                              top: `${overlapTopPct}%`, left: `${leftPct}%`,
+                              width: `${rightPct - leftPct}%`, height: `${topPct - overlapTopPct}%`,
+                            }} />
+                            <div className="overlap-zone" style={{
+                              top: `${bottomPct}%`, left: `${leftPct}%`,
+                              width: `${rightPct - leftPct}%`, height: `${overlapBottomPct - bottomPct}%`,
+                            }} />
+                          </>
+                        )}
+                        <div className="crop-dim" style={{ top: 0, left: 0, right: 0, height: `${topPct}%` }} />
+                        <div className="crop-dim" style={{ bottom: 0, left: 0, right: 0, height: `${100 - bottomPct}%` }} />
+                        <div className="crop-dim" style={{ top: `${topPct}%`, left: 0, width: `${leftPct}%`, bottom: `${100 - bottomPct}%` }} />
+                        <div className="crop-dim" style={{ top: `${topPct}%`, right: 0, width: `${100 - rightPct}%`, bottom: `${100 - bottomPct}%` }} />
+                        <div className="frame-line" style={{ top: `${topPct}%` }} />
+                        <div className="frame-line" style={{ top: `${bottomPct}%` }} />
+                        {stereo && (
+                          <div className="stereo-center-line" style={{
+                            top: `${topPct}%`, left: `${stereoMidPct}%`,
+                            height: `${bottomPct - topPct}%`,
+                          }} />
+                        )}
+                        {showStereoGuides && (
+                          <>
+                            {stereo ? (
+                              <>
+                                <div className="stereo-guide-line" style={{
+                                  top: `${topPct}%`, left: `${stereoLeftGuidePct}%`,
+                                  height: `${bottomPct - topPct}%`,
+                                }} />
+                                <div className="stereo-guide-line" style={{
+                                  top: `${topPct}%`, left: `${stereoRightGuidePct}%`,
+                                  height: `${bottomPct - topPct}%`,
+                                }} />
+                              </>
+                            ) : (
+                              <div className="stereo-guide-line" style={{
+                                top: `${topPct}%`, left: `${stereoMidPct}%`,
+                                height: `${bottomPct - topPct}%`,
+                              }} />
+                            )}
+                          </>
+                        )}
+                        <div className="crop-border" style={{
+                          top: `${topPct}%`, left: `${leftPct}%`,
+                          width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%`,
+                        }} />
+                        {dminPickPoint && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              top: `${(dminPickPoint.y / screenHeight) * 100}%`,
+                              left: `${(dminPickPoint.x / screenWidth) * 100}%`,
+                              width: 14,
+                              height: 14,
+                              borderRadius: '50%',
+                              border: '2px solid #ffd166',
+                              boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.65)',
+                              transform: 'translate(-50%, -50%)',
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                      </div>
+                      <div className="zoom-crosshair zoom-crosshair-h" />
+                      <div className="zoom-crosshair zoom-crosshair-v" />
+                      <div className="zoom-label">
+                        Zoom ×{zoomLevel.toFixed(1)} • x {hoverZoom.screenX}, y {hoverZoom.screenY}
+                      </div>
+                    </div>
+                  </>
+                )}
                 {dminPickPoint && (
                   <div
                     style={{
