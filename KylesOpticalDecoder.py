@@ -23,6 +23,7 @@ Extracts audio from scanned motion picture film optical soundtracks (variable-ar
   1. Load scanned frame images
   2. Crop to soundtrack region
   3. Apply image corrections (negative inversion, Dmin normalization, binary mask cleanup)
+  3. Apply image corrections (negative inversion, Dmin normalization, binary mask cleanup)
   4. Extract audio via scanline luminance averaging
   5. Resample to target sample rate
   6. Apply Butterworth HPF (DC bias removal) + LPF (anti-aliasing)
@@ -155,6 +156,8 @@ def parse_args():
 
 def correct_image(img_float, negative):
     """Apply the remaining image corrections to a floating-point image [0,1]."""
+def correct_image(img_float, negative):
+    """Apply the remaining image corrections to a floating-point image [0,1]."""
     img = img_float.copy()
 
     if negative:
@@ -162,6 +165,72 @@ def correct_image(img_float, negative):
 
     np.clip(img, 0.0, 1.0, out=img)
     return img
+
+
+def normalize_track_by_dmin(img_float, dmin_percentile=99.5, dmin_headroom=0.2, dmin_value=None):
+    """Normalize track image by Dmin estimate and apply headroom offset.
+
+    Dmin is estimated from a bright-point percentile in the cropped track image,
+    then the full image is divided by Dmin so clear aperture maps near 1.0.
+    A small headroom value is subtracted to reduce sensitivity to drift/noise.
+    """
+    if img_float.size == 0:
+        return img_float
+
+    if dmin_value is not None:
+        dmin = float(dmin_value)
+    else:
+        dmin = np.percentile(img_float, np.clip(dmin_percentile, 0.0, 100.0))
+    dmin = max(float(dmin), 1e-6)
+    normalized = img_float / dmin
+    normalized -= dmin_headroom
+    return np.clip(normalized, 0.0, 1.0)
+
+
+def estimate_dmin_from_track_point(img, top, bottom, left, right, rotate=0,
+                                   soundtrack_color="B&W", sample_x=None, sample_y=None,
+                                   negative=False):
+    """Estimate Dmin from a selected pixel in the cropped soundtrack area.
+
+    If *sample_x* and *sample_y* are omitted, the center of the cropped region
+    is used. The sampled value honors the negative-inversion setting so the
+    picker matches what the user sees in the preview.
+    """
+    cropped = img[top:bottom, left:right]
+    if cropped.size == 0:
+        raise ValueError("Invalid crop region for Dmin estimation")
+    cropped = select_soundtrack_channel(cropped, soundtrack_color)
+    cropped = rotate_image(cropped, rotate)
+    h, w = cropped.shape[:2]
+    if sample_x is None or sample_y is None:
+        cx = w // 2
+        cy = h // 2
+    else:
+        cx = int(np.clip(sample_x, 0, max(w - 1, 0)))
+        cy = int(np.clip(sample_y, 0, max(h - 1, 0)))
+
+    corrected = correct_image(cropped.astype(np.float64) / 255.0, negative)
+    dmin = max(float(corrected[cy, cx]), 1e-6)
+    dmin_u8 = int(np.clip(round(dmin * 255.0), 0, 255))
+    return dmin, cx, cy, dmin_u8
+
+
+def estimate_dmin_from_track_center(img, top, bottom, left, right, rotate=0,
+                                    soundtrack_color="B&W", negative=False):
+    """Backward-compatible wrapper for center-point Dmin estimation."""
+    return estimate_dmin_from_track_point(
+        img, top, bottom, left, right, rotate, soundtrack_color, None, None, negative
+    )
+
+
+def apply_binary_mask_threshold(img_float, negative, binary_lb=96, binary_ub=255):
+    """Apply OpenCV binary threshold on a [0,1] float image and return [0,1]."""
+    lb = int(np.clip(binary_lb, 0, 255))
+    ub = int(np.clip(binary_ub, 0, 255))
+    img_u8 = np.clip(img_float * 255.0, 0, 255).astype(np.uint8)
+    thresh_type = cv2.THRESH_BINARY_INV if negative else cv2.THRESH_BINARY
+    _, mask_u8 = cv2.threshold(img_u8, lb, ub, thresh_type)
+    return mask_u8.astype(np.float64) / 255.0
 
 
 def normalize_track_by_dmin(img_float, dmin_percentile=99.5, dmin_headroom=0.2, dmin_value=None):
@@ -485,6 +554,60 @@ def select_soundtrack_channel(img, soundtrack_color="B&W"):
     if soundtrack_color == "Cyan":
         return r
     return g
+SOUNDTRACK_COLOR_CHOICES = ("B&W", "High-Magenta", "Cyan")
+
+
+def parse_soundtrack_color_arg(value):
+    """Normalize CLI soundtrack-color values to canonical labels."""
+    raw = str(value).strip()
+    key = raw.lower().replace("_", "-")
+    if key in {"b&w", "bw", "blackwhite", "black-and-white"}:
+        return "B&W"
+    if key in {"high-magenta", "highmagenta", "magenta"}:
+        return "High-Magenta"
+    if key == "cyan":
+        return "Cyan"
+    raise argparse.ArgumentTypeError(
+        "Invalid --soundtrack-color value. Use one of: B&W, High-Magenta, Cyan"
+    )
+
+
+def select_soundtrack_channel(img, soundtrack_color="B&W"):
+    """Return a grayscale uint8 image for extraction based on soundtrack color rules.
+
+    Rules:
+      - If image is already monochrome, keep it as-is.
+      - Otherwise use GREEN for B&W and High-Magenta.
+      - Otherwise use RED for Cyan.
+    """
+    if img is None:
+        return None
+
+    if img.ndim == 2:
+        return img
+
+    if img.ndim == 3 and img.shape[2] == 1:
+        return img[:, :, 0]
+
+    if img.ndim != 3 or img.shape[2] < 3:
+        raise ValueError("Unsupported image format for soundtrack extraction")
+
+    b = img[:, :, 0]
+    g = img[:, :, 1]
+    r = img[:, :, 2]
+
+    # Treat tiny channel differences as monochrome (common with compressed video).
+    mono_like = (
+        np.max(cv2.absdiff(b, g)) <= 1
+        and np.max(cv2.absdiff(g, r)) <= 1
+        and np.max(cv2.absdiff(b, r)) <= 1
+    )
+    if mono_like:
+        return g
+
+    if soundtrack_color == "Cyan":
+        return r
+    return g
 
 
 # ---------------------------------------------------------------------------
@@ -500,8 +623,10 @@ class ImageSequenceSource:
         if not self._filenames:
             raise ValueError(f"No image files found in '{input_dir}'")
         first = cv2.imread(os.path.join(input_dir, self._filenames[0]), cv2.IMREAD_UNCHANGED)
+        first = cv2.imread(os.path.join(input_dir, self._filenames[0]), cv2.IMREAD_UNCHANGED)
         if first is None:
             raise RuntimeError(f"Could not read first frame: {self._filenames[0]}")
+        self._frame_height, self._frame_width = first.shape[:2]
         self._frame_height, self._frame_width = first.shape[:2]
 
     @property
@@ -537,10 +662,12 @@ class ImageSequenceSource:
 
     def load_frame(self, index):
         """Load frame by index as uint8 image (grayscale or color) or None."""
+        """Load frame by index as uint8 image (grayscale or color) or None."""
         if index < 0 or index >= len(self._filenames):
             return None
         return cv2.imread(
             os.path.join(self._input_dir, self._filenames[index]),
+            cv2.IMREAD_UNCHANGED,
             cv2.IMREAD_UNCHANGED,
         )
 
@@ -581,6 +708,7 @@ class VideoSource:
 
     def load_frame(self, index):
         """Seek to *index* and return the frame as uint8 image (or None)."""
+        """Seek to *index* and return the frame as uint8 image (or None)."""
         if index < 0 or index >= self._num_frames:
             return None
         with self._lock:
@@ -588,6 +716,7 @@ class VideoSource:
             ok, frame = self._cap.read()
         if not ok or frame is None:
             return None
+        return frame
         return frame
 
     def close(self):
@@ -621,6 +750,8 @@ def list_frames(input_dir):
 def load_frame(input_dir, filename):
     """Load a single frame as a uint8 numpy array (grayscale or color)."""
     return cv2.imread(os.path.join(input_dir, filename), cv2.IMREAD_UNCHANGED)
+    """Load a single frame as a uint8 numpy array (grayscale or color)."""
+    return cv2.imread(os.path.join(input_dir, filename), cv2.IMREAD_UNCHANGED)
 
 
 def rotate_image(img, degrees):
@@ -651,6 +782,7 @@ def crop_and_correct(img, top, bottom, left, right, rotate=0,
     """
     cropped = img[top:bottom, left:right]
     cropped = select_soundtrack_channel(cropped, soundtrack_color)
+    cropped = select_soundtrack_channel(cropped, soundtrack_color)
     cropped = rotate_image(cropped, rotate)
     img_float = cropped.astype(np.float64) / 255.0
     corrected = correct_image(img_float, negative)
@@ -669,6 +801,7 @@ def correct_full_frame(img, negative=False, soundtrack_color="B&W",
                        binary_mask=False, binary_lb=96, binary_ub=255,
                        dmin_value=None, integrate=False):
     """Apply corrections to the full frame (no crop/rotation). Returns float64 [0,1]."""
+    img = select_soundtrack_channel(img, soundtrack_color)
     img = select_soundtrack_channel(img, soundtrack_color)
     img_float = img.astype(np.float64) / 255.0
     corrected = correct_image(img_float, negative)
@@ -692,6 +825,7 @@ def corrected_to_jpeg(img_corrected):
 
 
 def frame_to_jpeg(img):
+    """Encode a raw uint8 image (grayscale or color) as JPEG bytes."""
     """Encode a raw uint8 image (grayscale or color) as JPEG bytes."""
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
@@ -885,6 +1019,13 @@ def main():
             print(f"  Warning: Could not read frame {frame_idx - args.audio_offset}, skipping.", file=sys.stderr)
             continue
 
+        img_corrected = crop_and_correct(
+            img,
+            top,
+            bottom,
+            left,
+            right,
+            rotate=args.rotate,
         img_corrected = crop_and_correct(
             img,
             top,

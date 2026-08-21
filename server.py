@@ -34,6 +34,7 @@ import tempfile
 import threading
 import time
 from typing import Literal
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -222,6 +223,44 @@ def get_preview_frame(
         integrate=integrate,
     )
     return Response(content=decoder.corrected_to_jpeg(corrected), media_type="image/jpeg")
+
+
+@app.get("/api/frame/{index}/estimate-dmin")
+def estimate_dmin(
+    index: int,
+    top: int = Query(0),
+    bottom: int = Query(0),
+    left: int = Query(0),
+    right: int = Query(0),
+    rotate: int = Query(0),
+    negative: bool = Query(False),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    sample_x: int | None = Query(None),
+    sample_y: int | None = Query(None),
+):
+    """Estimate Dmin from the crop center or a user-selected point."""
+    _check_loaded()
+    source = _state["source"]
+    if index < 0 or index >= source.num_frames:
+        raise HTTPException(404, f"Frame index {index} out of range (0–{source.num_frames - 1})")
+    img = source.load_frame(index)
+    if img is None:
+        raise HTTPException(500, f"Could not read frame {index}")
+    try:
+        dmin, point_x, point_y, point_u8 = decoder.estimate_dmin_from_track_point(
+            img, top, bottom, left, right, rotate, soundtrack_color, sample_x, sample_y, negative
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {
+        "dmin": dmin,
+        "point_x": point_x,
+        "point_y": point_y,
+        "point_u8": point_u8,
+        "center_x": point_x,
+        "center_y": point_y,
+        "center_u8": point_u8,
+    }
 
 
 @app.get("/api/frame/{index}/estimate-dmin")
