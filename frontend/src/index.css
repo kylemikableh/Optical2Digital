@@ -48,11 +48,16 @@ h1, h2, h3 { font-weight: 600; }
 
 .header {
   display: flex;
-  align-items: center;
-  gap: 16px;
+  flex-direction: column;
+  gap: 10px;
   padding: 12px 20px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+}
+.header-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 .header h1 { font-size: 18px; }
 .header .project-info { color: var(--text-muted); font-size: 13px; }
@@ -354,6 +359,22 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .checkbox-row input[type="checkbox"] { accent-color: var(--accent); }
+
+.mode-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.mode-toggle button {
+  flex: 1;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.mode-toggle button.active { background: var(--accent); color: white; }
 
 select {
   background: var(--bg);

@@ -8,3 +8,5 @@ docs/
 __pycache__/
 *.mov
 *.mp4
+*.bin
+srd/example_files

@@ -22,6 +22,7 @@ Python CLI tool that can extract film optical audio
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+
+- ffmpeg (must be on your `PATH`) — required for the Export Video feature (muxing/rendering); install via `brew install ffmpeg` (macOS), your Linux package manager, or from [ffmpeg.org](https://ffmpeg.org/) (Windows). Not required for WAV-only extraction.
 
 ### Setup (normal local)
 

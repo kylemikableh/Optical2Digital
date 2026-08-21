@@ -109,6 +109,7 @@ function App() {
   const [binaryMask, setBinaryMask] = useState(false)
   const [binaryLb, setBinaryLb] = useState(96)
   const [binaryUb, setBinaryUb] = useState(255)
+  const [integrate, setIntegrate] = useState(true)
 
   // Extraction settings
   const [fps, setFps] = useState(24.0)
@@ -116,6 +117,7 @@ function App() {
   const [hpf, setHpf] = useState(40.0)
   const [lpf, setLpf] = useState(13500.0)
   const [overlap, setOverlap] = useState(0.05)
+  const [audioOffset, setAudioOffset] = useState(21)
   const [soundtrackColor, setSoundtrackColor] = useState('B&W')
   const [reverse, setReverse] = useState(false)
   const [stereo, setStereo] = useState(true)
@@ -132,10 +134,17 @@ function App() {
   const [extracting, setExtracting] = useState(false)
   const [status, setStatus] = useState('')
   const [extractProgress, setExtractProgress] = useState(null)
+  const [isVideoSource, setIsVideoSource] = useState(false)
+  const [exportingVideo, setExportingVideo] = useState(false)
+  const [exportVideoStatus, setExportVideoStatus] = useState('')
+  const [exportVideoProgress, setExportVideoProgress] = useState(null)
   const [pickingDmin, setPickingDmin] = useState(false)
   const [dminPickPoint, setDminPickPoint] = useState(null)
   const [hoverZoom, setHoverZoom] = useState(null)
   const wakeLockRef = useRef(null)
+
+  // Sidebar panel selection
+  const [activePanel, setActivePanel] = useState('crop')
 
   // --- Load project ---
   const loadProject = useCallback(async () => {
@@ -170,11 +179,13 @@ function App() {
         setBinaryMask(saved.binaryMask ?? false)
         setBinaryLb(saved.binaryLb ?? 96)
         setBinaryUb(saved.binaryUb ?? 255)
+        setIntegrate(saved.integrate ?? true)
         setFps(saved.fps ?? data.fps ?? 24.0)
         setSampleRate(saved.sampleRate ?? 48000)
         setHpf(saved.hpf ?? 40.0)
         setLpf(saved.lpf ?? 13500.0)
         setOverlap(saved.overlap ?? 0.05)
+        setAudioOffset(saved.audioOffset ?? 21)
         setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
         setReverse(saved.reverse ?? false)
         setStereo(saved.stereo ?? true)
@@ -184,14 +195,15 @@ function App() {
         setStartFrame(saved.startFrame ?? 0)
         setEndFrame(saved.endFrame ?? data.num_frames - 1)
       } else {
-        if (data.fps) setFps(data.fps)
+        if (data.fps != null) setFps(data.fps)
         setStartFrame(0)
         setEndFrame(data.num_frames - 1)
       }
 
       setLoaded(true)
       setShowLoad(false)
-      const label = data.fps ? 'video' : 'image sequence'
+      setIsVideoSource(data.fps != null)
+      const label = data.fps != null ? 'video' : 'image sequence'
       setStatus(`Loaded ${data.num_frames} frames (${data.frame_width}×${data.frame_height}, ${label})`)
     } catch (e) {
       setLoadError(e.message)
@@ -204,15 +216,15 @@ function App() {
     saveSettings(inputDir, {
       cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
-      dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb,
-      fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, showStereoGuides,
+      dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
+      fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
-      dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb,
-      fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, showStereoGuides,
+      dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
+      fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame])
 
@@ -283,6 +295,7 @@ function App() {
     binary_mask: binaryMask,
     binary_lb: binaryLb,
     binary_ub: binaryUb,
+    integrate,
   }).toString()
   const correctedUrl = loaded
     ? `${API}/api/frame/${frameIndex}/corrected?${correctedParams}`
@@ -374,11 +387,13 @@ function App() {
         binaryMask,
         binaryLb,
         binaryUb,
+        integrate,
         fps,
         sampleRate,
         hpf,
         lpf,
         overlap,
+        audioOffset,
         soundtrackColor,
         reverse,
         stereo,
@@ -400,7 +415,7 @@ function App() {
     a.click()
     URL.revokeObjectURL(url)
     setStatus(`Saved settings file: ${safeBase}-settings.json`)
-  }, [inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
+  }, [inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
 
   const handleImportSettingsFile = useCallback(async (e) => {
     const file = e.target.files?.[0]
@@ -430,11 +445,13 @@ function App() {
       setBinaryMask(Boolean(saved.binaryMask ?? false))
       setBinaryLb(Number(saved.binaryLb ?? 96))
       setBinaryUb(Number(saved.binaryUb ?? 255))
+      setIntegrate(Boolean(saved.integrate ?? true))
       setFps(Number(saved.fps ?? 24.0))
       setSampleRate(Number(saved.sampleRate ?? 48000))
       setHpf(Number(saved.hpf ?? 40.0))
       setLpf(Number(saved.lpf ?? 13500.0))
       setOverlap(Number(saved.overlap ?? 0.05))
+      setAudioOffset(Number(saved.audioOffset ?? 21))
       setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
       setReverse(Boolean(saved.reverse ?? false))
       setStereo(Boolean(saved.stereo ?? true))
@@ -619,7 +636,8 @@ function App() {
           binary_mask: binaryMask,
           binary_lb: binaryLb,
           binary_ub: binaryUb,
-          fps, sample_rate: sampleRate, hpf, lpf, overlap, reverse,
+          integrate,
+          fps, sample_rate: sampleRate, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
           soundtrack_color: soundtrackColor,
           stereo,
           start_frame: startFrame,
@@ -706,7 +724,110 @@ function App() {
       setExtracting(false)
       setExtractProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, fps, sampleRate, hpf, lpf, overlap, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+
+  const handleExportVideo = useCallback(async () => {
+    setExportingVideo(true)
+    setExportVideoStatus('Starting...')
+    setExportVideoProgress(null)
+    setStatus('Starting video export...')
+
+    try {
+      const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
+      const res = await fetch(`${API}/api/export/video`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
+          rotate, negative,
+          dmin_value: dminValue,
+          dmin_headroom: dminHeadroom,
+          binary_mask: binaryMask,
+          binary_lb: binaryLb,
+          binary_ub: binaryUb,
+          integrate,
+          fps, sample_rate: sampleRate, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
+          soundtrack_color: soundtrackColor,
+          stereo,
+          start_frame: startFrame,
+          end_frame: endFrame,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Video export failed to start')
+      }
+
+      // Listen for SSE progress (auto-reconnects on transient drops)
+      await new Promise((resolve, reject) => {
+        let resolved = false
+        const connect = () => {
+          const es = new EventSource(`${API}/api/export/video/progress`)
+          es.onmessage = (ev) => {
+            const data = JSON.parse(ev.data)
+            setExportVideoProgress(data)
+
+            if (data.total > 0 && data.current < data.total) {
+              const pct = Math.round((data.current / data.total) * 100)
+              const text = `${data.phase}: ${data.current} / ${data.total} (${pct}%)`
+              setExportVideoStatus(text)
+              setStatus(text)
+            } else if (data.phase && !data.done) {
+              setExportVideoStatus(data.phase)
+              setStatus(data.phase)
+            }
+            if (data.done) {
+              es.close()
+              if (!resolved) {
+                resolved = true
+                data.error ? reject(new Error(data.error)) : resolve()
+              }
+            }
+          }
+          es.onerror = () => {
+            es.close()
+            if (resolved) return
+            setTimeout(() => {
+              if (resolved) return
+              fetch(`${API}/api/export/video/progress`)
+                .then(r => {
+                  if (!r.ok) throw new Error('Server gone')
+                  connect()
+                })
+                .catch(() => {
+                  if (!resolved) {
+                    resolved = true
+                    reject(new Error('Lost connection to server'))
+                  }
+                })
+            }, 1000)
+          }
+        }
+        connect()
+      })
+
+      // Download the result
+      const videoRes = await fetch(`${API}/api/export/video/result`)
+      if (!videoRes.ok) {
+        const err = await videoRes.json()
+        throw new Error(err.detail || 'Failed to download result')
+      }
+      const blob = await videoRes.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'output.mp4'
+      a.click()
+      URL.revokeObjectURL(url)
+      setStatus('Video export complete — MP4 downloaded')
+    } catch (e) {
+      setStatus(`Error: ${e.message}`)
+      setExportVideoStatus(`Error: ${e.message}`)
+    } finally {
+      setExportingVideo(false)
+      setExportVideoProgress(null)
+    }
+  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame])
 
   return (
     <div className="app">
@@ -733,41 +854,73 @@ function App() {
 
       {/* Header */}
       <div className="header">
-        <h1>Optical2Digital</h1>
-        {loaded && (
-          <>
-            <span className="project-info">{numFrames} frames • {frameWidth}×{frameHeight}</span>
-            <div className="header-actions">
-              <button className="btn-secondary btn-small" onClick={handleExportSettings}>
-                Save Settings
-              </button>
-              <button className="btn-secondary btn-small" onClick={() => importSettingsRef.current?.click()}>
-                Load Settings
-              </button>
-              <button className="btn-secondary btn-small" onClick={() => setShowLoad(true)}>Change</button>
-            </div>
-          </>
-        )}
+        <div className="header-top">
+          <h1>Optical2Digital</h1>
+          {loaded && (
+            <>
+              <span className="project-info">{numFrames} frames • {frameWidth}×{frameHeight}</span>
+              <div className="header-actions">
+                <button className="btn-secondary btn-small" onClick={handleExportSettings}>
+                  Save Settings
+                </button>
+                <button className="btn-secondary btn-small" onClick={() => importSettingsRef.current?.click()}>
+                  Load Settings
+                </button>
+                <button className="btn-secondary btn-small" onClick={() => setShowLoad(true)}>Change</button>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="header-tabs tab-bar">
+          <button type="button" className={activePanel === 'crop' ? 'active' : undefined} onClick={() => setActivePanel('crop')}>Crop Region</button>
+          <button type="button" className={activePanel === 'corrections' ? 'active' : undefined} onClick={() => setActivePanel('corrections')}>Image Corrections</button>
+          <button type="button" className={activePanel === 'audio' ? 'active' : undefined} onClick={() => setActivePanel('audio')}>Audio Settings</button>
+          <button type="button" className={activePanel === 'export' ? 'active' : undefined} onClick={() => setActivePanel('export')}>Export</button>
+        </div>
       </div>
 
       <div className="main">
         {/* Sidebar */}
         <div className="sidebar">
+          {/* Pixel value mode — always visible, shared across all panels */}
+          <div className="mode-toggle" role="radiogroup" aria-label="Pixel value mode">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={integrate}
+              className={integrate ? 'active' : undefined}
+              onClick={() => setIntegrate(true)}
+            >
+              Average Pixel Value
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!integrate}
+              className={!integrate ? 'active' : undefined}
+              onClick={() => setIntegrate(false)}
+            >
+              Binary Pixel Value
+            </button>
+          </div>
+
           {/* Crop */}
-          <section>
-            <h3>Crop Region</h3>
-            <div className="control-group">
-              <NumberInput label="Top" value={cropTop} onChange={setCropTop} min={0} max={screenHeight - trackHeight} />
-              <NumberInput label="Track Height" value={trackHeight} onChange={setTrackHeight} min={10} max={screenHeight} />
-              <NumberInput label="Left" value={cropLeft} onChange={setCropLeft} min={0} max={screenWidth} />
-              <NumberInput label="Right" value={cropRight} onChange={setCropRight} min={0} max={screenWidth} />
-              <div className="checkbox-row">
-                <input type="checkbox" id="show-zoom" checked={showZoom} onChange={e => setShowZoom(e.target.checked)} />
-                <label htmlFor="show-zoom">Show Hover Zoom</label>
+          {activePanel === 'crop' && (
+            <section>
+              <h3>Crop Region</h3>
+              <div className="control-group">
+                <NumberInput label="Top" value={cropTop} onChange={setCropTop} min={0} max={screenHeight - trackHeight} />
+                <NumberInput label="Track Height" value={trackHeight} onChange={setTrackHeight} min={10} max={screenHeight} />
+                <NumberInput label="Left" value={cropLeft} onChange={setCropLeft} min={0} max={screenWidth} />
+                <NumberInput label="Right" value={cropRight} onChange={setCropRight} min={0} max={screenWidth} />
+                <div className="checkbox-row">
+                  <input type="checkbox" id="show-zoom" checked={showZoom} onChange={e => setShowZoom(e.target.checked)} />
+                  <label htmlFor="show-zoom">Show Hover Zoom</label>
+                </div>
+                <SliderInput label="Zoom ×" value={zoomLevel} onChange={setZoomLevel} min={2} max={12} step={0.5} />
               </div>
-              <SliderInput label="Zoom ×" value={zoomLevel} onChange={setZoomLevel} min={2} max={12} step={0.5} />
-            </div>
-          </section>
+            </section>
+          )}
 
           <input
             ref={importSettingsRef}
@@ -778,96 +931,159 @@ function App() {
           />
 
           {/* Rotation */}
-          <section>
-            <h3>Rotation</h3>
-            <div className="control-row">
-              <label>Degrees CW</label>
-              <select value={rotate} onChange={e => setRotate(Number(e.target.value))}>
-                <option value={0}>0°</option>
-                <option value={90}>90°</option>
-                <option value={180}>180°</option>
-                <option value={270}>270°</option>
-              </select>
-            </div>
-          </section>
-
-          {/* Corrections */}
-          <section>
-            <h3>Image Corrections</h3>
-            <div className="control-group">
-              <div className="checkbox-row">
-                <input type="checkbox" id="neg" checked={negative} onChange={e => setNegative(e.target.checked)} />
-                <label htmlFor="neg">Negative inversion</label>
-              </div>
-              <NumberInput label="Dmin Value" value={dminValue} onChange={setDminValue} min={0.001} max={2.0} step={0.001} />
-              <button className="btn-secondary btn-small" onClick={handleEstimateDmin} disabled={!loaded || extracting}>
-                {pickingDmin ? 'Cancel DMIN Picker' : 'Pick DMIN from Image'}
-              </button>
-              {pickingDmin && (
-                <p className="hint">Click inside the crop region to sample DMIN.</p>
-              )}
-              <SliderInput label="Dmin Headroom" value={dminHeadroom} onChange={setDminHeadroom} min={0} max={0.5} step={0.01} />
-              <div className="checkbox-row">
-                <input type="checkbox" id="binary-mask" checked={binaryMask} onChange={e => setBinaryMask(e.target.checked)} />
-                <label htmlFor="binary-mask">Binary mask cleanup</label>
-              </div>
-              <NumberInput label="Binary LB" value={binaryLb} onChange={setBinaryLb} min={0} max={255} />
-              <NumberInput label="Binary UB" value={binaryUb} onChange={setBinaryUb} min={0} max={255} />
-            </div>
-          </section>
-
-          {/* Audio / Extraction */}
-          <section>
-            <h3>Audio Settings</h3>
-            <div className="control-group">
-              <NumberInput label="FPS" value={fps} onChange={setFps} min={1} max={120} step={0.001} />
-              <NumberInput label="Sample Rate" value={sampleRate} onChange={setSampleRate} min={8000} max={192000} />
-              <SliderInput label="HPF (Hz)" value={hpf} onChange={setHpf} min={0} max={500} step={1} />
-              <SliderInput label="LPF (Hz)" value={lpf} onChange={setLpf} min={1000} max={24000} step={100} />
-              <SliderInput label="Overlap" value={overlap} onChange={setOverlap} min={0} max={0.5} step={0.01} />
+          {activePanel === 'crop' && (
+            <section>
+              <h3>Rotation</h3>
               <div className="control-row">
-                <label>Soundtrack Color</label>
-                <select value={soundtrackColor} onChange={e => setSoundtrackColor(e.target.value)}>
-                  <option value="B&W">B&W</option>
-                  <option value="High-Magenta">High-Magenta</option>
-                  <option value="Cyan">Cyan</option>
+                <label>Degrees CW</label>
+                <select value={rotate} onChange={e => setRotate(Number(e.target.value))}>
+                  <option value={0}>0°</option>
+                  <option value={90}>90°</option>
+                  <option value={180}>180°</option>
+                  <option value={270}>270°</option>
                 </select>
               </div>
-              <div className="checkbox-row">
-                <input type="checkbox" id="rev" checked={reverse} onChange={e => setReverse(e.target.checked)} />
-                <label htmlFor="rev">Reverse frame order</label>
-              </div>
-              <div className="checkbox-row">
-                <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
-                <label htmlFor="stereo">Stereo (split L/R)</label>
-              </div>
-              <div className="checkbox-row">
-                <input type="checkbox" id="stereo-guides" checked={showStereoGuides} onChange={e => setShowStereoGuides(e.target.checked)} />
-                <label htmlFor="stereo-guides">Show Centerlines</label>
-              </div>
-              <NumberInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} />
-              <NumberInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} />
-            </div>
-          </section>
+            </section>
+          )}
 
-          {/* Extract */}
-          <section className="extract-section">
-            <h3>Extract</h3>
-            <button className="btn-primary" onClick={handleExtract} disabled={!loaded || extracting}>
-              {extracting ? 'Extracting...' : 'Extract Audio'}
-            </button>
-            <p className="hint" style={{ marginTop: 8 }}>
-              Channel in use: {soundtrackChannelLabel(soundtrackColor)}
-            </p>
-            {extracting && extractProgress && extractProgress.total > 0 && (
-              <div className="progress-bar">
-                <div
-                  className="progress-bar-fill"
-                  style={{ width: `${Math.round((extractProgress.current / extractProgress.total) * 100)}%` }}
-                />
+          {/* Corrections */}
+          {activePanel === 'corrections' && (
+            <section>
+              <h3>Image Corrections</h3>
+              <div className="control-group">
+                <div className="checkbox-row">
+                  <input type="checkbox" id="neg" checked={negative} onChange={e => setNegative(e.target.checked)} />
+                  <label htmlFor="neg">Negative inversion</label>
+                </div>
+                <NumberInput label="Dmin Value" value={dminValue} onChange={setDminValue} min={0.001} max={2.0} step={0.001} />
+                <button className="btn-secondary btn-small" onClick={handleEstimateDmin} disabled={!loaded || extracting}>
+                  {pickingDmin ? 'Cancel DMIN Picker' : 'Pick DMIN from Image'}
+                </button>
+                {pickingDmin && (
+                  <p className="hint">Click inside the crop region to sample DMIN.</p>
+                )}
+                <SliderInput label="Dmin Headroom" value={dminHeadroom} onChange={setDminHeadroom} min={0} max={0.5} step={0.01} />
+                {!integrate && (
+                  <>
+                    <div className="checkbox-row">
+                      <input type="checkbox" id="binary-mask" checked={binaryMask} onChange={e => setBinaryMask(e.target.checked)} />
+                      <label htmlFor="binary-mask">Binary mask cleanup</label>
+                    </div>
+                    <NumberInput label="Binary LB" value={binaryLb} onChange={setBinaryLb} min={0} max={255} />
+                    <NumberInput label="Binary UB" value={binaryUb} onChange={setBinaryUb} min={0} max={255} />
+                  </>
+                )}
               </div>
-            )}
-          </section>
+            </section>
+          )}
+
+          {/* Audio / Extraction */}
+          {activePanel === 'audio' && (
+            <section>
+              <h3>Audio Settings</h3>
+              <div className="control-group">
+                <NumberInput label="FPS" value={fps} onChange={setFps} min={1} max={120} step={0.001} />
+                <NumberInput label="Sample Rate" value={sampleRate} onChange={setSampleRate} min={8000} max={192000} />
+                <SliderInput label="HPF (Hz)" value={hpf} onChange={setHpf} min={0} max={500} step={1} />
+                <SliderInput label="LPF (Hz)" value={lpf} onChange={setLpf} min={1000} max={24000} step={100} />
+                <SliderInput label="Overlap" value={overlap} onChange={setOverlap} min={0} max={0.5} step={0.01} />
+                <NumberInput label="Audio Offset (frames)" value={audioOffset} onChange={setAudioOffset} min={-500} max={500} />
+                <div className="control-row">
+                  <label>Soundtrack Color</label>
+                  <select value={soundtrackColor} onChange={e => setSoundtrackColor(e.target.value)}>
+                    <option value="B&W">B&W</option>
+                    <option value="High-Magenta">High-Magenta</option>
+                    <option value="Cyan">Cyan</option>
+                  </select>
+                </div>
+                <div className="checkbox-row">
+                  <input type="checkbox" id="rev" checked={reverse} onChange={e => setReverse(e.target.checked)} />
+                  <label htmlFor="rev">Reverse frame order</label>
+                </div>
+                <div className="checkbox-row">
+                  <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
+                  <label htmlFor="stereo">Stereo (split L/R)</label>
+                </div>
+                <div className="checkbox-row">
+                  <input type="checkbox" id="stereo-guides" checked={showStereoGuides} onChange={e => setShowStereoGuides(e.target.checked)} />
+                  <label htmlFor="stereo-guides">Show Centerlines</label>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* Start/End frame — always visible, shared across all panels */}
+          <div className="control-group">
+            <NumberInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} />
+            <NumberInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} />
+          </div>
+
+          {/* Export */}
+          {activePanel === 'export' && (
+            <section className="extract-section">
+              <h3>Export WAV</h3>
+              <button className="btn-primary" onClick={handleExtract} disabled={!loaded || extracting || exportingVideo}>
+                {extracting ? 'Extracting...' : 'Export Audio (WAV)'}
+              </button>
+              <p className="hint" style={{ marginTop: 8 }}>
+                Channel in use: {soundtrackChannelLabel(soundtrackColor)}
+              </p>
+              {extracting && extractProgress && extractProgress.total > 0 && (
+                <div className="progress-bar">
+                  <div
+                    className="progress-bar-fill"
+                    style={{ width: `${Math.round((extractProgress.current / extractProgress.total) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </section>
+          )}
+
+          {activePanel === 'export' && isVideoSource && (
+            <section className="extract-section">
+              <h3>Export Video</h3>
+              <p className="hint">
+                Replaces the audio track of the original video with the extracted soundtrack, trimmed to the Start/End Frame range above. The picture is copied without re-encoding.
+              </p>
+              <button className="btn-primary" onClick={handleExportVideo} disabled={!loaded || extracting || exportingVideo}>
+                {exportingVideo ? 'Exporting...' : 'Export Video (MP4)'}
+              </button>
+              {exportingVideo && (
+                <p className="hint" style={{ marginTop: 8 }}>{exportVideoStatus}</p>
+              )}
+              {exportingVideo && exportVideoProgress && exportVideoProgress.total > 0 && (
+                <div className="progress-bar">
+                  <div
+                    className="progress-bar-fill"
+                    style={{ width: `${Math.round((exportVideoProgress.current / exportVideoProgress.total) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </section>
+          )}
+
+          {activePanel === 'export' && !isVideoSource && (
+            <section className="extract-section">
+              <h3>Export Video</h3>
+              <p className="hint">
+                Renders the full original scan frames (Start/End Frame range, at the FPS above, with Rotation applied) into a new video with the extracted soundtrack as its audio.
+              </p>
+              <button className="btn-primary" onClick={handleExportVideo} disabled={!loaded || extracting || exportingVideo}>
+                {exportingVideo ? 'Exporting...' : 'Export Video (MP4)'}
+              </button>
+              {exportingVideo && (
+                <p className="hint" style={{ marginTop: 8 }}>{exportVideoStatus}</p>
+              )}
+              {exportingVideo && exportVideoProgress && exportVideoProgress.total > 0 && (
+                <div className="progress-bar">
+                  <div
+                    className="progress-bar-fill"
+                    style={{ width: `${Math.round((exportVideoProgress.current / exportVideoProgress.total) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </section>
+          )}
         </div>
 
         {/* Preview with interactive crop overlay */}
@@ -1142,12 +1358,12 @@ function SliderInput({ label, value, onChange, min, max, step }) {
   )
 }
 
-function NumberInput({ label, value, onChange, min, max, step }) {
+function NumberInput({ label, value, onChange, min, max, step, disabled }) {
   return (
-    <div className="control-row">
+    <div className="control-row" style={disabled ? { opacity: 0.4 } : undefined}>
       <label>{label}</label>
       <input type="number" min={min} max={max} step={step || 1} value={value}
-        onChange={e => onChange(Number(e.target.value))} />
+        onChange={e => onChange(Number(e.target.value))} disabled={disabled} />
     </div>
   )
 }

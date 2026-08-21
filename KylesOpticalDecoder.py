@@ -113,6 +113,14 @@ def parse_args():
         help="Fraction of frame height to search for overlap between consecutive frames (0 = disabled, 0.25 = 25%%)",
     )
     parser.add_argument(
+        "--audio-offset", type=int, default=21,
+        help=(
+            "Sound advance in frames: the soundtrack for picture frame N is printed "
+            "this many frames earlier in the scan (frame N - offset). 21 is the typical "
+            "default for optical film prints."
+        ),
+    )
+    parser.add_argument(
         "--rotate", type=int, default=0, choices=[0, 90, 180, 270],
         help="Rotate cropped image by this many degrees clockwise before extraction",
     )
@@ -127,6 +135,15 @@ def parse_args():
         help=(
             "Soundtrack stock color type. For non-monochrome frames: "
             "B&W/High-Magenta use GREEN channel; Cyan uses RED channel"
+        ),
+    )
+    parser.add_argument(
+        "--binary-pixel-value", dest="integrate", action="store_false", default=True,
+        help=(
+            "Use Binary Pixel Value mode (Dmin normalization, optionally followed by "
+            "binary threshold masking) instead of the default Average Pixel Value mode "
+            "(SVA integration: sum raw channel transmittance). Useful when the default "
+            "mode struggles with anti-aliased images."
         ),
     )
     return parser.parse_args()
@@ -503,6 +520,21 @@ class ImageSequenceSource:
     def fps(self):
         return None
 
+    @property
+    def input_dir(self):
+        return self._input_dir
+
+    @property
+    def filenames(self):
+        """Naturally-sorted list of frame filenames (read-only copy)."""
+        return list(self._filenames)
+
+    def frame_path(self, index):
+        """Absolute path to the frame file at *index*, or None if out of range."""
+        if index < 0 or index >= len(self._filenames):
+            return None
+        return os.path.abspath(os.path.join(self._input_dir, self._filenames[index]))
+
     def load_frame(self, index):
         """Load frame by index as uint8 image (grayscale or color) or None."""
         if index < 0 or index >= len(self._filenames):
@@ -542,6 +574,10 @@ class VideoSource:
     @property
     def fps(self):
         return self._fps
+
+    @property
+    def path(self):
+        return self._path
 
     def load_frame(self, index):
         """Seek to *index* and return the frame as uint8 image (or None)."""
@@ -602,16 +638,24 @@ def crop_and_correct(img, top, bottom, left, right, rotate=0,
                      negative=False, soundtrack_color="B&W",
                      dmin_percentile=99.5, dmin_headroom=0.2,
                      binary_mask=False, binary_lb=96, binary_ub=255,
-                     dmin_value=None):
+                     dmin_value=None, integrate=False):
     """Crop, rotate, channel-select, and prepare a frame for extraction.
 
     Returns the corrected image as a float64 array in [0, 1].
+
+    When *integrate* is True (Average Pixel Value mode), Dmin normalization and
+    binary-mask thresholding are skipped so that raw channel transmittance is
+    preserved linearly — the correct approach for synthetic SVA renders with
+    anti-aliased edges. When False (Binary Pixel Value mode), Dmin normalization
+    is applied and binary-mask thresholding is available on top of it.
     """
     cropped = img[top:bottom, left:right]
     cropped = select_soundtrack_channel(cropped, soundtrack_color)
     cropped = rotate_image(cropped, rotate)
     img_float = cropped.astype(np.float64) / 255.0
     corrected = correct_image(img_float, negative)
+    if integrate:
+        return corrected
     normalized = normalize_track_by_dmin(
         corrected, dmin_percentile, dmin_headroom, dmin_value
     )
@@ -623,11 +667,13 @@ def crop_and_correct(img, top, bottom, left, right, rotate=0,
 def correct_full_frame(img, negative=False, soundtrack_color="B&W",
                        dmin_percentile=99.5, dmin_headroom=0.2,
                        binary_mask=False, binary_lb=96, binary_ub=255,
-                       dmin_value=None):
+                       dmin_value=None, integrate=False):
     """Apply corrections to the full frame (no crop/rotation). Returns float64 [0,1]."""
     img = select_soundtrack_channel(img, soundtrack_color)
     img_float = img.astype(np.float64) / 255.0
     corrected = correct_image(img_float, negative)
+    if integrate:
+        return corrected
     normalized = normalize_track_by_dmin(
         corrected, dmin_percentile, dmin_headroom, dmin_value
     )
@@ -655,12 +701,13 @@ def frame_to_jpeg(img):
 
 def extract_audio(source, top, bottom, left, right,
                   rotate=0, negative=False, fps=24.0, sample_rate=48000,
-                  hpf=40.0, lpf=13500.0, overlap=0.25,
+                  hpf=40.0, lpf=13500.0, overlap=0.25, audio_offset=21,
                   stereo=False, progress_callback=None, reverse=False,
                   phase_callback=None, start_frame=0, end_frame=None,
                   soundtrack_color="B&W", dmin_percentile=99.5,
                   dmin_headroom=0.2, binary_mask=False,
-                  binary_lb=96, binary_ub=255, dmin_value=None):
+                  binary_lb=96, binary_ub=255, dmin_value=None,
+                  integrate=False):
     """Run the full extraction pipeline. Returns (sample_rate, int16_array).
 
     *source* is a FrameSource object (ImageSequenceSource or VideoSource).
@@ -670,7 +717,13 @@ def extract_audio(source, top, bottom, left, right,
     *phase_callback*, if provided, is called with a string describing the
     current processing phase.
     *start_frame* and *end_frame* allow processing a sub-range of frames
-    (end_frame is inclusive; defaults to the last frame).
+    (end_frame is inclusive; defaults to the last frame) — this is the
+    picture frame range; it stays fixed regardless of *audio_offset*.
+    *audio_offset* corrects for the physical sound advance printed on
+    optical film: the soundtrack for picture frame N is printed earlier
+    in the scan, at frame N - audio_offset, so each picture index in
+    [start_frame, end_frame] is read for audio at (idx - audio_offset)
+    rather than idx itself.
     """
     def _phase(msg):
         if phase_callback:
@@ -690,7 +743,7 @@ def extract_audio(source, top, bottom, left, right,
     total = len(indices)
 
     for count, idx in enumerate(indices):
-        img = source.load_frame(idx)
+        img = source.load_frame(idx - audio_offset)
         if img is None:
             continue
         corrected = crop_and_correct(
@@ -708,6 +761,7 @@ def extract_audio(source, top, bottom, left, right,
             binary_lb=binary_lb,
             binary_ub=binary_ub,
             dmin_value=dmin_value,
+            integrate=integrate,
         )
         if stereo:
             l_ch, r_ch = extract_stereo_scanline_audio(corrected)
@@ -739,8 +793,14 @@ def extract_audio(source, top, bottom, left, right,
             raw_signal = stitch_with_overlap(all_samples, overlap)
         else:
             raw_signal = np.concatenate(all_samples)
-        native_rate = len(all_samples[0]) * fps
-        target_n = int(len(raw_signal) * sample_rate / native_rate)
+        # Target length is anchored to the true elapsed time (n_frames / fps),
+        # not to len(raw_signal) — overlap-based stitching removes genuinely
+        # duplicated (overscanned) content, which shortens raw_signal without
+        # changing how much real time these frames actually span. Deriving
+        # target_n from raw_signal's length would shrink the output audio by
+        # however much overlap was removed, drifting it out of sync with a
+        # video track (which stays at full, uncompressed length).
+        target_n = int(round(len(all_samples) / fps * sample_rate))
         _phase(f"Resampling {label}")
         signal = _chunked_resample(raw_signal, target_n)
         _phase(f"Filtering {label}")
@@ -795,12 +855,17 @@ def main():
     top, bottom, left, right = args.crop
     print(f"Crop region: top={top} bottom={bottom} left={left} right={right}")
     print(f"Soundtrack color mode: {args.soundtrack_color}")
-    print(
-        f"Dmin normalize: value={args.dmin_value if args.dmin_value is not None else 'auto'}, "
-        f"p{args.dmin_percentile:.1f}, "
-        f"headroom={args.dmin_headroom:.3f}, "
-        f"binary_mask={args.binary_mask} (lb={args.binary_lb}, ub={args.binary_ub})"
-    )
+    print(f"Audio offset: {args.audio_offset} frames")
+    if args.integrate:
+        print("Pixel value mode: Average Pixel Value (SVA integration)")
+    else:
+        print(
+            f"Pixel value mode: Binary Pixel Value — "
+            f"Dmin normalize: value={args.dmin_value if args.dmin_value is not None else 'auto'}, "
+            f"p{args.dmin_percentile:.1f}, "
+            f"headroom={args.dmin_headroom:.3f}, "
+            f"binary_mask={args.binary_mask} (lb={args.binary_lb}, ub={args.binary_ub})"
+        )
 
     # --- Prepare crop dump directory if requested ---
     if args.dump_crops:
@@ -815,9 +880,9 @@ def main():
         indices = indices[::-1]
 
     for count, frame_idx in enumerate(indices):
-        img = source.load_frame(frame_idx)
+        img = source.load_frame(frame_idx - args.audio_offset)
         if img is None:
-            print(f"  Warning: Could not read frame {frame_idx}, skipping.", file=sys.stderr)
+            print(f"  Warning: Could not read frame {frame_idx - args.audio_offset}, skipping.", file=sys.stderr)
             continue
 
         img_corrected = crop_and_correct(
@@ -835,6 +900,7 @@ def main():
             binary_lb=args.binary_lb,
             binary_ub=args.binary_ub,
             dmin_value=args.dmin_value,
+            integrate=args.integrate,
         )
 
         # Dump cropped image if requested
