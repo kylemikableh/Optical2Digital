@@ -84,11 +84,6 @@ function soundtrackChannelLabel(soundtrackColor) {
   return 'GREEN channel (non-monochrome frames)'
 }
 
-function soundtrackChannelLabel(soundtrackColor) {
-  if (soundtrackColor === 'Cyan') return 'RED channel (non-monochrome frames)'
-  return 'GREEN channel (non-monochrome frames)'
-}
-
 function App() {
   // Project state
   const [loaded, setLoaded] = useState(false)
@@ -129,15 +124,11 @@ function App() {
   const [showStereoGuides, setShowStereoGuides] = useState(true)
   const [showZoom, setShowZoom] = useState(true)
   const [zoomLevel, setZoomLevel] = useState(6)
-  const [showStereoGuides, setShowStereoGuides] = useState(true)
-  const [showZoom, setShowZoom] = useState(true)
-  const [zoomLevel, setZoomLevel] = useState(6)
   const [startFrame, setStartFrame] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
 
   // Crop overlay interaction
   const imgRef = useRef(null)
-  const importSettingsRef = useRef(null)
   const importSettingsRef = useRef(null)
   const [dragState, setDragState] = useState(null)
   const [extracting, setExtracting] = useState(false)
@@ -201,9 +192,6 @@ function App() {
         setShowStereoGuides(saved.showStereoGuides ?? true)
         setShowZoom(saved.showZoom ?? true)
         setZoomLevel(saved.zoomLevel ?? 6)
-        setShowStereoGuides(saved.showStereoGuides ?? true)
-        setShowZoom(saved.showZoom ?? true)
-        setZoomLevel(saved.zoomLevel ?? 6)
         setStartFrame(saved.startFrame ?? 0)
         setEndFrame(saved.endFrame ?? data.num_frames - 1)
       } else {
@@ -239,16 +227,6 @@ function App() {
       fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame])
-
-  useEffect(() => {
-    setDminPickPoint(null)
-    setPickingDmin(false)
-    setHoverZoom(null)
-  }, [frameIndex])
-
-  useEffect(() => {
-    if (!showZoom) setHoverZoom(null)
-  }, [showZoom])
 
   useEffect(() => {
     setDminPickPoint(null)
@@ -347,41 +325,10 @@ function App() {
   const stereoMidPct = (leftPct + rightPct) / 2
   const stereoLeftGuidePct = leftPct + ((rightPct - leftPct) / 4)
   const stereoRightGuidePct = leftPct + (((rightPct - leftPct) * 3) / 4)
-  const stereoMidPct = (leftPct + rightPct) / 2
-  const stereoLeftGuidePct = leftPct + ((rightPct - leftPct) / 4)
-  const stereoRightGuidePct = leftPct + (((rightPct - leftPct) * 3) / 4)
 
   // Overlap zone percentages
   const overlapTopPct = screenHeight > 0 ? (overlapTopY / screenHeight * 100) : 0
   const overlapBottomPct = screenHeight > 0 ? (overlapBottomY / screenHeight * 100) : 0
-  const zoomPanelSize = 220
-  const zoomFocusSize = Math.max(18, Math.min(90, zoomPanelSize / Math.max(zoomLevel, 1)))
-  const zoomPanelMargin = 12
-  const zoomPanelOffset = 24
-  const zoomPanelLeft = hoverZoom
-    ? Math.min(
-        Math.max(
-          hoverZoom.relX + zoomPanelOffset + zoomPanelSize <= hoverZoom.renderedWidth
-            ? hoverZoom.relX + zoomPanelOffset
-            : hoverZoom.relX - zoomPanelSize - zoomPanelOffset,
-          zoomPanelMargin,
-        ),
-        Math.max(zoomPanelMargin, hoverZoom.renderedWidth - zoomPanelSize - zoomPanelMargin),
-      )
-    : zoomPanelMargin
-  const zoomPanelTop = hoverZoom
-    ? Math.min(
-        Math.max(
-          hoverZoom.relY + zoomPanelOffset + zoomPanelSize <= hoverZoom.renderedHeight
-            ? hoverZoom.relY + zoomPanelOffset
-            : hoverZoom.relY - zoomPanelSize - zoomPanelOffset,
-          zoomPanelMargin,
-        ),
-        Math.max(zoomPanelMargin, hoverZoom.renderedHeight - zoomPanelSize - zoomPanelMargin),
-      )
-    : zoomPanelMargin
-  const zoomTranslateX = hoverZoom ? (zoomPanelSize / 2) - (hoverZoom.relX * zoomLevel) : 0
-  const zoomTranslateY = hoverZoom ? (zoomPanelSize / 2) - (hoverZoom.relY * zoomLevel) : 0
   const zoomPanelSize = 220
   const zoomFocusSize = Math.max(18, Math.min(90, zoomPanelSize / Math.max(zoomLevel, 1)))
   const zoomPanelMargin = 12
@@ -608,93 +555,7 @@ function App() {
     setHoverZoom(null)
   }, [])
 
-  const handlePreviewMouseMove = useCallback((e) => {
-    if (!showZoom || !imgRef.current) return
-
-    const rect = imgRef.current.getBoundingClientRect()
-    const relX = e.clientX - rect.left
-    const relY = e.clientY - rect.top
-    if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) {
-      setHoverZoom(null)
-      return
-    }
-
-    const screenX = Math.round((relX / Math.max(rect.width, 1)) * Math.max(screenWidth - 1, 0))
-    const screenY = Math.round((relY / Math.max(rect.height, 1)) * Math.max(screenHeight - 1, 0))
-
-    setHoverZoom({
-      relX,
-      relY,
-      renderedWidth: rect.width,
-      renderedHeight: rect.height,
-      screenX,
-      screenY,
-    })
-  }, [showZoom, screenWidth, screenHeight])
-
-  const handlePreviewMouseLeave = useCallback(() => {
-    setHoverZoom(null)
-  }, [])
-
   // --- Extract ---
-  const handleEstimateDmin = useCallback(() => {
-    if (!loaded || extracting) return
-    setPickingDmin((active) => {
-      const next = !active
-      setStatus(next
-        ? 'DMIN picker active — click a point inside the crop region.'
-        : 'DMIN picker cancelled.')
-      return next
-    })
-  }, [loaded, extracting])
-
-  const handlePreviewClick = useCallback(async (e) => {
-    if (!pickingDmin || !loaded || !imgRef.current) return
-
-    const rect = imgRef.current.getBoundingClientRect()
-    const relX = e.clientX - rect.left
-    const relY = e.clientY - rect.top
-    if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) return
-
-    const screenX = Math.round((relX / rect.width) * screenWidth)
-    const screenY = Math.round((relY / rect.height) * screenHeight)
-
-    if (screenX < cropLeft || screenX > cropRight || screenY < cropTop || screenY > cropBottom) {
-      setStatus('Click inside the soundtrack crop region to sample DMIN.')
-      return
-    }
-
-    try {
-      const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
-      const sampleX = Math.max(0, Math.min(Math.round(screenX - cropLeft), Math.max(cropRight - cropLeft - 1, 0)))
-      const sampleY = Math.max(0, Math.min(Math.round(screenY - cropTop), Math.max(cropBottom - cropTop - 1, 0)))
-      const params = new URLSearchParams({
-        top: imgCrop.top,
-        bottom: imgCrop.bottom,
-        left: imgCrop.left,
-        right: imgCrop.right,
-        rotate,
-        negative,
-        soundtrack_color: soundtrackColor,
-        sample_x: sampleX,
-        sample_y: sampleY,
-      }).toString()
-      const res = await fetch(`${API}/api/frame/${frameIndex}/estimate-dmin?${params}`)
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Failed to estimate DMIN')
-      }
-      const data = await res.json()
-      setDminValue(Number(data.dmin))
-      setDminPickPoint({ x: screenX, y: screenY })
-      setPickingDmin(false)
-      setStatus(`Estimated DMIN=${Number(data.dmin).toFixed(4)} from picked point (${data.point_x}, ${data.point_y})`)
-    } catch (e) {
-      setPickingDmin(false)
-      setStatus(`Error estimating DMIN: ${e.message}`)
-    }
-  }, [pickingDmin, loaded, cropTop, cropBottom, cropLeft, cropRight, rotate, soundtrackColor, frameIndex, screenWidth, screenHeight])
-
   const handleEstimateDmin = useCallback(() => {
     if (!loaded || extracting) return
     setPickingDmin((active) => {
@@ -762,12 +623,6 @@ function App() {
     setFrameIndex(reverse ? rangeEnd : rangeStart)
     setStatus(`Starting extraction for frames ${rangeStart}-${rangeEnd}...`)
 
-
-    const rangeStart = Math.max(0, Math.min(startFrame, endFrame))
-    const rangeEnd = Math.min(numFrames - 1, Math.max(startFrame, endFrame))
-    setFrameIndex(reverse ? rangeEnd : rangeStart)
-    setStatus(`Starting extraction for frames ${rangeStart}-${rangeEnd}...`)
-
     try {
       const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
       const res = await fetch(`${API}/api/extract`, {
@@ -808,22 +663,11 @@ function App() {
               ? Math.max(rangeStart, rangeEnd - Math.max(completed - 1, 0))
               : Math.min(rangeEnd, rangeStart + Math.max(completed - 1, 0))
 
-
-            const completed = Math.max(0, Math.min(data.current ?? 0, data.total ?? 0))
-            const currentFrame = reverse
-              ? Math.max(rangeStart, rangeEnd - Math.max(completed - 1, 0))
-              : Math.min(rangeEnd, rangeStart + Math.max(completed - 1, 0))
-
             if (data.total > 0 && data.current < data.total) {
               const pct = Math.round((completed / data.total) * 100)
               setStatus(`${data.phase}: frame ${currentFrame} of range ${rangeStart}-${rangeEnd} • ${completed} / ${data.total} (${pct}%)`)
               setFrameIndex(currentFrame)
-              const pct = Math.round((completed / data.total) * 100)
-              setStatus(`${data.phase}: frame ${currentFrame} of range ${rangeStart}-${rangeEnd} • ${completed} / ${data.total} (${pct}%)`)
-              setFrameIndex(currentFrame)
             } else if (data.phase && !data.done) {
-              setStatus(`${data.phase}: frame ${currentFrame} of range ${rangeStart}-${rangeEnd}...`)
-              setFrameIndex(currentFrame)
               setStatus(`${data.phase}: frame ${currentFrame} of range ${rangeStart}-${rangeEnd}...`)
               setFrameIndex(currentFrame)
             }
@@ -1253,13 +1097,6 @@ function App() {
                 onMouseLeave={handlePreviewMouseLeave}
                 style={{ cursor: pickingDmin ? 'crosshair' : undefined }}
               >
-              <div
-                className="image-wrapper"
-                onClick={handlePreviewClick}
-                onMouseMove={handlePreviewMouseMove}
-                onMouseLeave={handlePreviewMouseLeave}
-                style={{ cursor: pickingDmin ? 'crosshair' : undefined }}
-              >
                 <img ref={imgRef} src={rawSrc} alt={`Frame ${frameIndex}`} className="base-image" />
                 {/* Corrected image clipped to crop region */}
                 {correctedSrc && <img
@@ -1288,34 +1125,11 @@ function App() {
                 <div className="frame-line" style={{ top: `${topPct}%` }} />
                 <div className="frame-line" style={{ top: `${bottomPct}%` }} />
                 {/* Channel guide lines */}
-                {/* Channel guide lines */}
                 {stereo && (
                   <div className="stereo-center-line" style={{
                     top: `${topPct}%`, left: `${stereoMidPct}%`,
-                    top: `${topPct}%`, left: `${stereoMidPct}%`,
                     height: `${bottomPct - topPct}%`,
                   }} />
-                )}
-                {showStereoGuides && (
-                  <>
-                    {stereo ? (
-                      <>
-                        <div className="stereo-guide-line" style={{
-                          top: `${topPct}%`, left: `${stereoLeftGuidePct}%`,
-                          height: `${bottomPct - topPct}%`,
-                        }} />
-                        <div className="stereo-guide-line" style={{
-                          top: `${topPct}%`, left: `${stereoRightGuidePct}%`,
-                          height: `${bottomPct - topPct}%`,
-                        }} />
-                      </>
-                    ) : (
-                      <div className="stereo-guide-line" style={{
-                        top: `${topPct}%`, left: `${stereoMidPct}%`,
-                        height: `${bottomPct - topPct}%`,
-                      }} />
-                    )}
-                  </>
                 )}
                 {showStereoGuides && (
                   <>
@@ -1468,140 +1282,10 @@ function App() {
                     }}
                   />
                 )}
-                {showZoom && hoverZoom && rawSrc && (
-                  <>
-                    <div
-                      className="zoom-focus-box"
-                      style={{
-                        top: `${(hoverZoom.screenY / Math.max(screenHeight, 1)) * 100}%`,
-                        left: `${(hoverZoom.screenX / Math.max(screenWidth, 1)) * 100}%`,
-                        width: `${zoomFocusSize}px`,
-                        height: `${zoomFocusSize}px`,
-                      }}
-                    />
-                    <div
-                      className="zoom-panel"
-                      style={{
-                        left: `${zoomPanelLeft}px`,
-                        top: `${zoomPanelTop}px`,
-                      }}
-                    >
-                      <div
-                        className="zoom-scene"
-                        style={{
-                          width: `${hoverZoom.renderedWidth}px`,
-                          height: `${hoverZoom.renderedHeight}px`,
-                          transform: `translate(${zoomTranslateX}px, ${zoomTranslateY}px) scale(${zoomLevel})`,
-                        }}
-                      >
-                        <img src={rawSrc} alt="" className="zoom-image" />
-                        {correctedSrc && (
-                          <img
-                            src={correctedSrc}
-                            alt=""
-                            className="corrected-image"
-                            style={{ clipPath: `inset(${topPct}% ${100 - rightPct}% ${100 - bottomPct}% ${leftPct}%)` }}
-                          />
-                        )}
-                        {overlapPx > 0 && (
-                          <>
-                            <div className="overlap-zone" style={{
-                              top: `${overlapTopPct}%`, left: `${leftPct}%`,
-                              width: `${rightPct - leftPct}%`, height: `${topPct - overlapTopPct}%`,
-                            }} />
-                            <div className="overlap-zone" style={{
-                              top: `${bottomPct}%`, left: `${leftPct}%`,
-                              width: `${rightPct - leftPct}%`, height: `${overlapBottomPct - bottomPct}%`,
-                            }} />
-                          </>
-                        )}
-                        <div className="crop-dim" style={{ top: 0, left: 0, right: 0, height: `${topPct}%` }} />
-                        <div className="crop-dim" style={{ bottom: 0, left: 0, right: 0, height: `${100 - bottomPct}%` }} />
-                        <div className="crop-dim" style={{ top: `${topPct}%`, left: 0, width: `${leftPct}%`, bottom: `${100 - bottomPct}%` }} />
-                        <div className="crop-dim" style={{ top: `${topPct}%`, right: 0, width: `${100 - rightPct}%`, bottom: `${100 - bottomPct}%` }} />
-                        <div className="frame-line" style={{ top: `${topPct}%` }} />
-                        <div className="frame-line" style={{ top: `${bottomPct}%` }} />
-                        {stereo && (
-                          <div className="stereo-center-line" style={{
-                            top: `${topPct}%`, left: `${stereoMidPct}%`,
-                            height: `${bottomPct - topPct}%`,
-                          }} />
-                        )}
-                        {showStereoGuides && (
-                          <>
-                            {stereo ? (
-                              <>
-                                <div className="stereo-guide-line" style={{
-                                  top: `${topPct}%`, left: `${stereoLeftGuidePct}%`,
-                                  height: `${bottomPct - topPct}%`,
-                                }} />
-                                <div className="stereo-guide-line" style={{
-                                  top: `${topPct}%`, left: `${stereoRightGuidePct}%`,
-                                  height: `${bottomPct - topPct}%`,
-                                }} />
-                              </>
-                            ) : (
-                              <div className="stereo-guide-line" style={{
-                                top: `${topPct}%`, left: `${stereoMidPct}%`,
-                                height: `${bottomPct - topPct}%`,
-                              }} />
-                            )}
-                          </>
-                        )}
-                        <div className="crop-border" style={{
-                          top: `${topPct}%`, left: `${leftPct}%`,
-                          width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%`,
-                        }} />
-                        {dminPickPoint && (
-                          <div
-                            style={{
-                              position: 'absolute',
-                              top: `${(dminPickPoint.y / screenHeight) * 100}%`,
-                              left: `${(dminPickPoint.x / screenWidth) * 100}%`,
-                              width: 14,
-                              height: 14,
-                              borderRadius: '50%',
-                              border: '2px solid #ffd166',
-                              boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.65)',
-                              transform: 'translate(-50%, -50%)',
-                              pointerEvents: 'none',
-                            }}
-                          />
-                        )}
-                      </div>
-                      <div className="zoom-crosshair zoom-crosshair-h" />
-                      <div className="zoom-crosshair zoom-crosshair-v" />
-                      <div className="zoom-label">
-                        Zoom ×{zoomLevel.toFixed(1)} • x {hoverZoom.screenX}, y {hoverZoom.screenY}
-                      </div>
-                    </div>
-                  </>
-                )}
-                {dminPickPoint && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: `${(dminPickPoint.y / screenHeight) * 100}%`,
-                      left: `${(dminPickPoint.x / screenWidth) * 100}%`,
-                      width: 14,
-                      height: 14,
-                      borderRadius: '50%',
-                      border: '2px solid #ffd166',
-                      boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.65)',
-                      transform: 'translate(-50%, -50%)',
-                      pointerEvents: 'none',
-                    }}
-                  />
-                )}
                 {/* Draggable move area */}
                 <div
                   className="crop-move-area"
                   style={{ top: `${topPct}%`, left: `${leftPct}%`, width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%` }}
-                  onMouseDown={e => {
-                    if (pickingDmin) return
-                    e.preventDefault()
-                    setDragState({ type: 'move', startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight })
-                  }}
                   onMouseDown={e => {
                     if (pickingDmin) return
                     e.preventDefault()
@@ -1622,12 +1306,6 @@ function App() {
                   <div
                     key={h.type} className="crop-handle"
                     style={{ top: `${h.top}%`, left: `${h.left}%`, transform: 'translate(-50%, -50%)', cursor: h.cursor }}
-                    onMouseDown={e => {
-                      if (pickingDmin) return
-                      e.preventDefault()
-                      e.stopPropagation()
-                      setDragState({ type: h.type, startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight })
-                    }}
                     onMouseDown={e => {
                       if (pickingDmin) return
                       e.preventDefault()
