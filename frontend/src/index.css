@@ -344,6 +344,9 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .load-dialog h2 { margin-bottom: 16px; }
 
+.load-dialog .browse-actions { display: flex; gap: 8px; margin-bottom: 12px; }
+.load-dialog .browse-actions button { flex: 1; }
+
 .load-dialog input[type="text"] {
   width: 100%;
   padding: 10px 12px;
