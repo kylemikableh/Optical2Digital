@@ -925,7 +925,7 @@ function App() {
             {loadError && <p className="error">{loadError}</p>}
             <div className="actions">
               {loaded && <button className="btn-secondary" onClick={() => setShowLoad(false)}>Cancel</button>}
-              <button className="btn-primary" onClick={loadProject}>Load</button>
+              <button className="btn-primary" onClick={() => loadProject()}>Load</button>
             </div>
           </div>
         </div>
