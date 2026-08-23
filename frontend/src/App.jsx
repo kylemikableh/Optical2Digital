@@ -396,7 +396,7 @@ function App() {
     }
   }
 
-  const handleExportSettings = useCallback(() => {
+  const handleExportSettings = useCallback(async () => {
     const payload = {
       app: 'Optical2Digital',
       version: 1,
@@ -434,15 +434,27 @@ function App() {
 
     const safeBase = (inputDir.split(/[\\/]/).filter(Boolean).pop() || 'optical2digital')
       .replace(/[^a-z0-9._-]+/gi, '_')
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const filename = `${safeBase}-settings.json`
+    const content = JSON.stringify(payload, null, 2)
+
+    if (hasNativeBrowse) {
+      // Blob + <a download> navigates the packaged app's webview to the
+      // blob: URL instead of downloading it, breaking the UI — use the
+      // native Save panel instead.
+      const path = await window.pywebview.api.save_text_file(filename, content)
+      setStatus(path ? `Saved settings file: ${path}` : 'Save cancelled')
+      return
+    }
+
+    const blob = new Blob([content], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${safeBase}-settings.json`
+    a.download = filename
     a.click()
     URL.revokeObjectURL(url)
-    setStatus(`Saved settings file: ${safeBase}-settings.json`)
-  }, [inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
+    setStatus(`Saved settings file: ${filename}`)
+  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
 
   const handleImportSettingsFile = useCallback(async (e) => {
     const file = e.target.files?.[0]
@@ -731,27 +743,44 @@ function App() {
         connect()
       })
 
-      // Download the result
-      const wavRes = await fetch(`${API}/api/extract/result`)
-      if (!wavRes.ok) {
-        const err = await wavRes.json()
-        throw new Error(err.detail || 'Failed to download result')
+      if (hasNativeBrowse) {
+        // Blob + <a download> navigates the packaged app's webview to the
+        // blob: URL instead of downloading it, breaking the UI — use the
+        // native Save panel and let the backend write directly to disk.
+        const path = await window.pywebview.api.choose_save_path('output.wav', ['WAV Audio (*.wav)'])
+        if (!path) {
+          setStatus('Save cancelled')
+          return
+        }
+        const saveRes = await fetch(`${API}/api/extract/result?save_path=${encodeURIComponent(path)}`)
+        if (!saveRes.ok) {
+          const err = await saveRes.json()
+          throw new Error(err.detail || 'Failed to save result')
+        }
+        setStatus(`Extraction complete — saved to ${path}`)
+      } else {
+        // Download the result
+        const wavRes = await fetch(`${API}/api/extract/result`)
+        if (!wavRes.ok) {
+          const err = await wavRes.json()
+          throw new Error(err.detail || 'Failed to download result')
+        }
+        const blob = await wavRes.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'output.wav'
+        a.click()
+        URL.revokeObjectURL(url)
+        setStatus('Extraction complete — WAV downloaded')
       }
-      const blob = await wavRes.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'output.wav'
-      a.click()
-      URL.revokeObjectURL(url)
-      setStatus('Extraction complete — WAV downloaded')
     } catch (e) {
       setStatus(`Error: ${e.message}`)
     } finally {
       setExtracting(false)
       setExtractProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
 
   const handleExportVideo = useCallback(async () => {
     setExportingVideo(true)
@@ -833,20 +862,37 @@ function App() {
         connect()
       })
 
-      // Download the result
-      const videoRes = await fetch(`${API}/api/export/video/result`)
-      if (!videoRes.ok) {
-        const err = await videoRes.json()
-        throw new Error(err.detail || 'Failed to download result')
+      if (hasNativeBrowse) {
+        // Blob + <a download> navigates the packaged app's webview to the
+        // blob: URL instead of downloading it, breaking the UI — use the
+        // native Save panel and let the backend write directly to disk.
+        const path = await window.pywebview.api.choose_save_path('output.mp4', ['MP4 Video (*.mp4)'])
+        if (!path) {
+          setStatus('Save cancelled')
+          return
+        }
+        const saveRes = await fetch(`${API}/api/export/video/result?save_path=${encodeURIComponent(path)}`)
+        if (!saveRes.ok) {
+          const err = await saveRes.json()
+          throw new Error(err.detail || 'Failed to save result')
+        }
+        setStatus(`Video export complete — saved to ${path}`)
+      } else {
+        // Download the result
+        const videoRes = await fetch(`${API}/api/export/video/result`)
+        if (!videoRes.ok) {
+          const err = await videoRes.json()
+          throw new Error(err.detail || 'Failed to download result')
+        }
+        const blob = await videoRes.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'output.mp4'
+        a.click()
+        URL.revokeObjectURL(url)
+        setStatus('Video export complete — MP4 downloaded')
       }
-      const blob = await videoRes.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'output.mp4'
-      a.click()
-      URL.revokeObjectURL(url)
-      setStatus('Video export complete — MP4 downloaded')
     } catch (e) {
       setStatus(`Error: ${e.message}`)
       setExportVideoStatus(`Error: ${e.message}`)
@@ -854,7 +900,7 @@ function App() {
       setExportingVideo(false)
       setExportVideoProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame])
 
   return (
     <div className="app">

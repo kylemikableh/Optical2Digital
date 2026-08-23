@@ -394,8 +394,9 @@ def extract_progress():
 
 
 @app.get("/api/extract/result")
-def extract_result():
-    """Download the completed WAV file."""
+def extract_result(save_path: str | None = Query(None)):
+    """Return the completed WAV file, or (if `save_path` is given, from
+    the packaged app's native Save panel) write it directly to disk."""
     if _extract_job["running"]:
         raise HTTPException(409, "Extraction still in progress")
     if _extract_job["error"]:
@@ -404,11 +405,7 @@ def extract_result():
         raise HTTPException(404, "No extraction result available")
     wav_bytes = _extract_job["wav_bytes"]
     _extract_job["wav_bytes"] = None  # free memory
-    return Response(
-        content=wav_bytes,
-        media_type="audio/wav",
-        headers={"Content-Disposition": "attachment; filename=output.wav"},
-    )
+    return _respond_with_result(wav_bytes, "output.wav", "audio/wav", save_path)
 
 
 @app.post("/api/export/video")
@@ -544,8 +541,9 @@ def export_video_progress():
 
 
 @app.get("/api/export/video/result")
-def export_video_result():
-    """Download the completed MP4 file."""
+def export_video_result(save_path: str | None = Query(None)):
+    """Return the completed MP4 file, or (if `save_path` is given, from
+    the packaged app's native Save panel) write it directly to disk."""
     if _export_video_job["running"]:
         raise HTTPException(409, "Video export still in progress")
     if _export_video_job["error"]:
@@ -554,11 +552,7 @@ def export_video_result():
         raise HTTPException(404, "No video export result available")
     video_bytes = _export_video_job["video_bytes"]
     _export_video_job["video_bytes"] = None  # free memory
-    return Response(
-        content=video_bytes,
-        media_type="video/mp4",
-        headers={"Content-Disposition": "attachment; filename=output.mp4"},
-    )
+    return _respond_with_result(video_bytes, "output.mp4", "video/mp4", save_path)
 
 
 # ---------------------------------------------------------------------------
@@ -570,13 +564,47 @@ def _check_loaded():
         raise HTTPException(400, "No project loaded. POST /api/load first.")
 
 
+def _respond_with_result(data, filename, media_type, save_path):
+    """Either write *data* directly to *save_path* (native Save panel in
+    the packaged app — see packaging/launcher.py's Api.choose_save_path)
+    or fall back to a browser-download Response (dev mode)."""
+    if save_path:
+        try:
+            with open(save_path, "wb") as f:
+                f.write(data)
+        except OSError as e:
+            raise HTTPException(500, f"Failed to save file: {e}")
+        return {"status": "saved", "path": save_path}
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+def _resolve_ffmpeg_path():
+    """Return the ffmpeg executable to use.
+
+    When running as a frozen PyInstaller app (sys.frozen is set), prefer the
+    binary bundled alongside the app by packaging/optical2digital.spec.
+    Otherwise (normal `python server.py`, dev/CLI mode), fall back to
+    whatever's on PATH — exactly the behavior this project had before the
+    packaged-app feature existed.
+    """
+    if getattr(sys, "frozen", False):
+        bundled = pathlib.Path(getattr(sys, "_MEIPASS", "")) / "ffmpeg"
+        if bundled.is_file() and os.access(bundled, os.X_OK):
+            return str(bundled)
+    return shutil.which("ffmpeg")
+
+
 def _check_ffmpeg():
-    if shutil.which("ffmpeg") is None:
+    if _resolve_ffmpeg_path() is None:
         raise HTTPException(
             500,
-            "ffmpeg was not found on the server's PATH. Install ffmpeg "
-            "(e.g. `brew install ffmpeg` on macOS, or see ffmpeg.org) and "
-            "restart the server to enable video export.",
+            "ffmpeg was not found. Install ffmpeg (e.g. `brew install ffmpeg` "
+            "on macOS, or see ffmpeg.org) and restart the server to enable "
+            "video export.",
         )
 
 
@@ -602,7 +630,7 @@ def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_fram
     end_time = (end_frame + 1) / fps
     duration = end_time - start_time
     cmd = [
-        "ffmpeg", "-y",
+        _resolve_ffmpeg_path(), "-y",
         # -ss/-t are per-input options in ffmpeg — they apply to whichever -i
         # follows them, so they must precede the *video* -i, not sit between
         # the two -i flags (which would trim the WAV input instead).
@@ -645,7 +673,7 @@ def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame,
             f.write(f"file '{last_path}'\n")
 
     cmd = [
-        "ffmpeg", "-y",
+        _resolve_ffmpeg_path(), "-y",
         "-f", "concat", "-safe", "0",
         "-i", list_path,
         "-i", wav_path,
