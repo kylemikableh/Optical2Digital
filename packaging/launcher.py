@@ -51,6 +51,27 @@ class Api:
         )
         return result[0] if result else None
 
+    def choose_save_path(self, default_filename="", file_types=()):
+        """Native Save panel — returns the chosen destination path, or
+        None if cancelled. Used for large binary results (WAV/MP4) whose
+        bytes stay server-side; only the path crosses the JS bridge."""
+        result = webview.windows[0].create_file_dialog(
+            FileDialog.SAVE,
+            save_filename=default_filename,
+            file_types=tuple(file_types),
+        )
+        return result[0] if result else None
+
+    def save_text_file(self, default_filename, content):
+        """Save panel + direct write, for small client-generated text
+        (settings JSON) — no backend round trip needed."""
+        path = self.choose_save_path(default_filename)
+        if not path:
+            return None
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
 
 def start_server_thread(app, host=HOST, port=PORT):
     """Start uvicorn serving *app* in a background thread.

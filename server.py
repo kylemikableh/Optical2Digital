@@ -394,8 +394,9 @@ def extract_progress():
 
 
 @app.get("/api/extract/result")
-def extract_result():
-    """Download the completed WAV file."""
+def extract_result(save_path: str | None = Query(None)):
+    """Return the completed WAV file, or (if `save_path` is given, from
+    the packaged app's native Save panel) write it directly to disk."""
     if _extract_job["running"]:
         raise HTTPException(409, "Extraction still in progress")
     if _extract_job["error"]:
@@ -404,11 +405,7 @@ def extract_result():
         raise HTTPException(404, "No extraction result available")
     wav_bytes = _extract_job["wav_bytes"]
     _extract_job["wav_bytes"] = None  # free memory
-    return Response(
-        content=wav_bytes,
-        media_type="audio/wav",
-        headers={"Content-Disposition": "attachment; filename=output.wav"},
-    )
+    return _respond_with_result(wav_bytes, "output.wav", "audio/wav", save_path)
 
 
 @app.post("/api/export/video")
@@ -544,8 +541,9 @@ def export_video_progress():
 
 
 @app.get("/api/export/video/result")
-def export_video_result():
-    """Download the completed MP4 file."""
+def export_video_result(save_path: str | None = Query(None)):
+    """Return the completed MP4 file, or (if `save_path` is given, from
+    the packaged app's native Save panel) write it directly to disk."""
     if _export_video_job["running"]:
         raise HTTPException(409, "Video export still in progress")
     if _export_video_job["error"]:
@@ -554,11 +552,7 @@ def export_video_result():
         raise HTTPException(404, "No video export result available")
     video_bytes = _export_video_job["video_bytes"]
     _export_video_job["video_bytes"] = None  # free memory
-    return Response(
-        content=video_bytes,
-        media_type="video/mp4",
-        headers={"Content-Disposition": "attachment; filename=output.mp4"},
-    )
+    return _respond_with_result(video_bytes, "output.mp4", "video/mp4", save_path)
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +562,24 @@ def export_video_result():
 def _check_loaded():
     if _state["source"] is None:
         raise HTTPException(400, "No project loaded. POST /api/load first.")
+
+
+def _respond_with_result(data, filename, media_type, save_path):
+    """Either write *data* directly to *save_path* (native Save panel in
+    the packaged app — see packaging/launcher.py's Api.choose_save_path)
+    or fall back to a browser-download Response (dev mode)."""
+    if save_path:
+        try:
+            with open(save_path, "wb") as f:
+                f.write(data)
+        except OSError as e:
+            raise HTTPException(500, f"Failed to save file: {e}")
+        return {"status": "saved", "path": save_path}
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 def _resolve_ffmpeg_path():
