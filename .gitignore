@@ -8,3 +8,8 @@ docs/
 __pycache__/
 *.mov
 *.mp4
+*.bin
+srd/example_files
+packaging/build/
+packaging/dist/
+packaging/icon.icns

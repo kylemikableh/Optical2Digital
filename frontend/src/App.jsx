@@ -79,6 +79,11 @@ function loadSettings(path) {
   } catch { return null }
 }
 
+function soundtrackChannelLabel(soundtrackColor) {
+  if (soundtrackColor === 'Cyan') return 'RED channel (non-monochrome frames)'
+  return 'GREEN channel (non-monochrome frames)'
+}
+
 function App() {
   // Project state
   const [loaded, setLoaded] = useState(false)
@@ -89,6 +94,7 @@ function App() {
   const [inputDir, setInputDir] = useState('./examples/output/')
   const [showLoad, setShowLoad] = useState(true)
   const [loadError, setLoadError] = useState('')
+  const [hasNativeBrowse, setHasNativeBrowse] = useState(false)
 
   // Crop
   const [cropTop, setCropTop] = useState(297)
@@ -99,10 +105,12 @@ function App() {
   // Corrections
   const [rotate, setRotate] = useState(0)
   const [negative, setNegative] = useState(false)
-  const [lift, setLift] = useState(0.0)
-  const [gamma, setGamma] = useState(1.0)
-  const [gain, setGain] = useState(1.0)
-  const [threshold, setThreshold] = useState(0.0)
+  const [dminValue, setDminValue] = useState(1.0)
+  const [dminHeadroom, setDminHeadroom] = useState(0.2)
+  const [binaryMask, setBinaryMask] = useState(false)
+  const [binaryLb, setBinaryLb] = useState(96)
+  const [binaryUb, setBinaryUb] = useState(255)
+  const [integrate, setIntegrate] = useState(true)
 
   // Extraction settings
   const [fps, setFps] = useState(24.0)
@@ -110,27 +118,54 @@ function App() {
   const [hpf, setHpf] = useState(40.0)
   const [lpf, setLpf] = useState(13500.0)
   const [overlap, setOverlap] = useState(0.05)
+  const [audioOffset, setAudioOffset] = useState(21)
+  const [soundtrackColor, setSoundtrackColor] = useState('B&W')
   const [reverse, setReverse] = useState(false)
   const [stereo, setStereo] = useState(true)
+  const [showStereoGuides, setShowStereoGuides] = useState(true)
+  const [showZoom, setShowZoom] = useState(true)
+  const [zoomLevel, setZoomLevel] = useState(6)
   const [startFrame, setStartFrame] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
 
   // Crop overlay interaction
   const imgRef = useRef(null)
+  const importSettingsRef = useRef(null)
   const [dragState, setDragState] = useState(null)
   const [extracting, setExtracting] = useState(false)
   const [status, setStatus] = useState('')
   const [extractProgress, setExtractProgress] = useState(null)
+  const [isVideoSource, setIsVideoSource] = useState(false)
+  const [exportingVideo, setExportingVideo] = useState(false)
+  const [exportVideoStatus, setExportVideoStatus] = useState('')
+  const [exportVideoProgress, setExportVideoProgress] = useState(null)
+  const [pickingDmin, setPickingDmin] = useState(false)
+  const [dminPickPoint, setDminPickPoint] = useState(null)
+  const [hoverZoom, setHoverZoom] = useState(null)
   const wakeLockRef = useRef(null)
 
+  // Sidebar panel selection
+  const [activePanel, setActivePanel] = useState('crop')
+
+  // --- Detect the pywebview native-dialog bridge (packaged app only) ---
+  useEffect(() => {
+    if (window.pywebview?.api) {
+      setHasNativeBrowse(true)
+      return
+    }
+    const onReady = () => setHasNativeBrowse(true)
+    window.addEventListener('pywebviewready', onReady)
+    return () => window.removeEventListener('pywebviewready', onReady)
+  }, [])
+
   // --- Load project ---
-  const loadProject = useCallback(async () => {
+  const loadProject = useCallback(async (path = inputDir) => {
     setLoadError('')
     try {
       const res = await fetch(`${API}/api/load`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input_dir: inputDir }),
+        body: JSON.stringify({ input_dir: path }),
       })
       if (!res.ok) {
         const err = await res.json()
@@ -143,7 +178,7 @@ function App() {
       setFrameIndex(0)
 
       // Restore saved settings for this path, or use defaults
-      const saved = loadSettings(inputDir)
+      const saved = loadSettings(path)
       if (saved) {
         setCropTop(saved.cropTop ?? 297)
         setTrackHeight(saved.trackHeight ?? 3070)
@@ -151,47 +186,84 @@ function App() {
         setCropRight(saved.cropRight ?? 1191)
         setRotate(saved.rotate ?? 0)
         setNegative(saved.negative ?? false)
-        setLift(saved.lift ?? 0.0)
-        setGamma(saved.gamma ?? 1.0)
-        setGain(saved.gain ?? 1.0)
-        setThreshold(saved.threshold ?? 0.0)
+        setDminValue(saved.dminValue ?? 1.0)
+        setDminHeadroom(saved.dminHeadroom ?? 0.2)
+        setBinaryMask(saved.binaryMask ?? false)
+        setBinaryLb(saved.binaryLb ?? 96)
+        setBinaryUb(saved.binaryUb ?? 255)
+        setIntegrate(saved.integrate ?? true)
         setFps(saved.fps ?? data.fps ?? 24.0)
         setSampleRate(saved.sampleRate ?? 48000)
         setHpf(saved.hpf ?? 40.0)
         setLpf(saved.lpf ?? 13500.0)
         setOverlap(saved.overlap ?? 0.05)
+        setAudioOffset(saved.audioOffset ?? 21)
+        setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
         setReverse(saved.reverse ?? false)
         setStereo(saved.stereo ?? true)
+        setShowStereoGuides(saved.showStereoGuides ?? true)
+        setShowZoom(saved.showZoom ?? true)
+        setZoomLevel(saved.zoomLevel ?? 6)
         setStartFrame(saved.startFrame ?? 0)
         setEndFrame(saved.endFrame ?? data.num_frames - 1)
       } else {
-        if (data.fps) setFps(data.fps)
+        if (data.fps != null) setFps(data.fps)
         setStartFrame(0)
         setEndFrame(data.num_frames - 1)
       }
 
       setLoaded(true)
       setShowLoad(false)
-      const label = data.fps ? 'video' : 'image sequence'
+      setIsVideoSource(data.fps != null)
+      const label = data.fps != null ? 'video' : 'image sequence'
       setStatus(`Loaded ${data.num_frames} frames (${data.frame_width}×${data.frame_height}, ${label})`)
     } catch (e) {
       setLoadError(e.message)
     }
   }, [inputDir])
 
+  // --- Native folder/video pickers (packaged app only, via pywebview) ---
+  const handleBrowseFolder = useCallback(async () => {
+    const path = await window.pywebview.api.choose_folder()
+    if (!path) return
+    setInputDir(path)
+    loadProject(path)
+  }, [loadProject])
+
+  const handleBrowseVideo = useCallback(async () => {
+    const path = await window.pywebview.api.choose_video_file()
+    if (!path) return
+    setInputDir(path)
+    loadProject(path)
+  }, [loadProject])
+
   // --- Auto-save settings to localStorage whenever they change ---
   useEffect(() => {
     if (!loaded) return
     saveSettings(inputDir, {
       cropTop, trackHeight, cropLeft, cropRight,
-      rotate, negative, lift, gamma, gain, threshold,
-      fps, sampleRate, hpf, lpf, overlap, reverse, stereo,
+      rotate, negative,
+      dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
+      fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
+      showZoom, zoomLevel,
       startFrame, endFrame,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
-      rotate, negative, lift, gamma, gain, threshold,
-      fps, sampleRate, hpf, lpf, overlap, reverse, stereo,
+      rotate, negative,
+      dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
+      fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
+      showZoom, zoomLevel,
       startFrame, endFrame])
+
+  useEffect(() => {
+    setDminPickPoint(null)
+    setPickingDmin(false)
+    setHoverZoom(null)
+  }, [frameIndex])
+
+  useEffect(() => {
+    if (!showZoom) setHoverZoom(null)
+  }, [showZoom])
 
   // Keep the screen awake on supported browsers while a project is loaded.
   useEffect(() => {
@@ -242,7 +314,15 @@ function App() {
     : null
 
   const correctedParams = new URLSearchParams({
-    rotate, negative, lift, gamma, gain, threshold,
+    rotate,
+    negative,
+    soundtrack_color: soundtrackColor,
+    dmin_value: dminValue,
+    dmin_headroom: dminHeadroom,
+    binary_mask: binaryMask,
+    binary_lb: binaryLb,
+    binary_ub: binaryUb,
+    integrate,
   }).toString()
   const correctedUrl = loaded
     ? `${API}/api/frame/${frameIndex}/corrected?${correctedParams}`
@@ -269,10 +349,41 @@ function App() {
   const bottomPct = screenHeight > 0 ? (cropBottom / screenHeight * 100) : 0
   const leftPct = screenWidth > 0 ? (cropLeft / screenWidth * 100) : 0
   const rightPct = screenWidth > 0 ? (cropRight / screenWidth * 100) : 0
+  const stereoMidPct = (leftPct + rightPct) / 2
+  const stereoLeftGuidePct = leftPct + ((rightPct - leftPct) / 4)
+  const stereoRightGuidePct = leftPct + (((rightPct - leftPct) * 3) / 4)
 
   // Overlap zone percentages
   const overlapTopPct = screenHeight > 0 ? (overlapTopY / screenHeight * 100) : 0
   const overlapBottomPct = screenHeight > 0 ? (overlapBottomY / screenHeight * 100) : 0
+  const zoomPanelSize = 220
+  const zoomFocusSize = Math.max(18, Math.min(90, zoomPanelSize / Math.max(zoomLevel, 1)))
+  const zoomPanelMargin = 12
+  const zoomPanelOffset = 24
+  const zoomPanelLeft = hoverZoom
+    ? Math.min(
+        Math.max(
+          hoverZoom.relX + zoomPanelOffset + zoomPanelSize <= hoverZoom.renderedWidth
+            ? hoverZoom.relX + zoomPanelOffset
+            : hoverZoom.relX - zoomPanelSize - zoomPanelOffset,
+          zoomPanelMargin,
+        ),
+        Math.max(zoomPanelMargin, hoverZoom.renderedWidth - zoomPanelSize - zoomPanelMargin),
+      )
+    : zoomPanelMargin
+  const zoomPanelTop = hoverZoom
+    ? Math.min(
+        Math.max(
+          hoverZoom.relY + zoomPanelOffset + zoomPanelSize <= hoverZoom.renderedHeight
+            ? hoverZoom.relY + zoomPanelOffset
+            : hoverZoom.relY - zoomPanelSize - zoomPanelOffset,
+          zoomPanelMargin,
+        ),
+        Math.max(zoomPanelMargin, hoverZoom.renderedHeight - zoomPanelSize - zoomPanelMargin),
+      )
+    : zoomPanelMargin
+  const zoomTranslateX = hoverZoom ? (zoomPanelSize / 2) - (hoverZoom.relX * zoomLevel) : 0
+  const zoomTranslateY = hoverZoom ? (zoomPanelSize / 2) - (hoverZoom.relY * zoomLevel) : 0
 
   // Convert screen-space crop to image-space crop for API calls
   function screenToImageCrop(sTop, sBot, sLeft, sRight) {
@@ -284,6 +395,117 @@ function App() {
       default:  return { top: sTop, bottom: sBot, left: sLeft, right: sRight }
     }
   }
+
+  const handleExportSettings = useCallback(async () => {
+    const payload = {
+      app: 'Optical2Digital',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      inputDir,
+      settings: {
+        cropTop,
+        trackHeight,
+        cropLeft,
+        cropRight,
+        rotate,
+        negative,
+        dminValue,
+        dminHeadroom,
+        binaryMask,
+        binaryLb,
+        binaryUb,
+        integrate,
+        fps,
+        sampleRate,
+        hpf,
+        lpf,
+        overlap,
+        audioOffset,
+        soundtrackColor,
+        reverse,
+        stereo,
+        showStereoGuides,
+        showZoom,
+        zoomLevel,
+        startFrame,
+        endFrame,
+      },
+    }
+
+    const safeBase = (inputDir.split(/[\\/]/).filter(Boolean).pop() || 'optical2digital')
+      .replace(/[^a-z0-9._-]+/gi, '_')
+    const filename = `${safeBase}-settings.json`
+    const content = JSON.stringify(payload, null, 2)
+
+    if (hasNativeBrowse) {
+      // Blob + <a download> navigates the packaged app's webview to the
+      // blob: URL instead of downloading it, breaking the UI — use the
+      // native Save panel instead.
+      const path = await window.pywebview.api.save_text_file(filename, content)
+      setStatus(path ? `Saved settings file: ${path}` : 'Save cancelled')
+      return
+    }
+
+    const blob = new Blob([content], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+    setStatus(`Saved settings file: ${filename}`)
+  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
+
+  const handleImportSettingsFile = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    try {
+      const text = await file.text()
+      const payload = JSON.parse(text)
+      const saved = payload?.settings ?? payload
+      if (!saved || typeof saved !== 'object') {
+        throw new Error('Invalid settings file')
+      }
+
+      if (!loaded && typeof payload?.inputDir === 'string' && payload.inputDir.trim()) {
+        setInputDir(payload.inputDir)
+      }
+
+      const maxFrame = Math.max(numFrames - 1, 0)
+      setCropTop(Number(saved.cropTop ?? 297))
+      setTrackHeight(Number(saved.trackHeight ?? 3070))
+      setCropLeft(Number(saved.cropLeft ?? 849))
+      setCropRight(Number(saved.cropRight ?? 1191))
+      setRotate(Number(saved.rotate ?? 0))
+      setNegative(Boolean(saved.negative ?? false))
+      setDminValue(Number(saved.dminValue ?? 1.0))
+      setDminHeadroom(Number(saved.dminHeadroom ?? 0.2))
+      setBinaryMask(Boolean(saved.binaryMask ?? false))
+      setBinaryLb(Number(saved.binaryLb ?? 96))
+      setBinaryUb(Number(saved.binaryUb ?? 255))
+      setIntegrate(Boolean(saved.integrate ?? true))
+      setFps(Number(saved.fps ?? 24.0))
+      setSampleRate(Number(saved.sampleRate ?? 48000))
+      setHpf(Number(saved.hpf ?? 40.0))
+      setLpf(Number(saved.lpf ?? 13500.0))
+      setOverlap(Number(saved.overlap ?? 0.05))
+      setAudioOffset(Number(saved.audioOffset ?? 21))
+      setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
+      setReverse(Boolean(saved.reverse ?? false))
+      setStereo(Boolean(saved.stereo ?? true))
+      setShowStereoGuides(Boolean(saved.showStereoGuides ?? true))
+      setShowZoom(Boolean(saved.showZoom ?? true))
+      setZoomLevel(Number(saved.zoomLevel ?? 6))
+      setStartFrame(Math.max(0, Math.min(Number(saved.startFrame ?? 0), maxFrame)))
+      setEndFrame(Math.max(0, Math.min(Number(saved.endFrame ?? maxFrame), maxFrame)))
+      setStatus(`Loaded settings from ${file.name}`)
+    } catch (err) {
+      setStatus(`Error loading settings: ${err.message}`)
+    } finally {
+      e.target.value = ''
+    }
+  }, [loaded, numFrames])
 
   // --- Crop drag handling ---
   useEffect(() => {
@@ -344,11 +566,102 @@ function App() {
     }
   }, [dragState, screenWidth, screenHeight, trackHeight])
 
+  const handlePreviewMouseMove = useCallback((e) => {
+    if (!showZoom || !imgRef.current) return
+
+    const rect = imgRef.current.getBoundingClientRect()
+    const relX = e.clientX - rect.left
+    const relY = e.clientY - rect.top
+    if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) {
+      setHoverZoom(null)
+      return
+    }
+
+    const screenX = Math.round((relX / Math.max(rect.width, 1)) * Math.max(screenWidth - 1, 0))
+    const screenY = Math.round((relY / Math.max(rect.height, 1)) * Math.max(screenHeight - 1, 0))
+
+    setHoverZoom({
+      relX,
+      relY,
+      renderedWidth: rect.width,
+      renderedHeight: rect.height,
+      screenX,
+      screenY,
+    })
+  }, [showZoom, screenWidth, screenHeight])
+
+  const handlePreviewMouseLeave = useCallback(() => {
+    setHoverZoom(null)
+  }, [])
+
   // --- Extract ---
+  const handleEstimateDmin = useCallback(() => {
+    if (!loaded || extracting) return
+    setPickingDmin((active) => {
+      const next = !active
+      setStatus(next
+        ? 'DMIN picker active — click a point inside the crop region.'
+        : 'DMIN picker cancelled.')
+      return next
+    })
+  }, [loaded, extracting])
+
+  const handlePreviewClick = useCallback(async (e) => {
+    if (!pickingDmin || !loaded || !imgRef.current) return
+
+    const rect = imgRef.current.getBoundingClientRect()
+    const relX = e.clientX - rect.left
+    const relY = e.clientY - rect.top
+    if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) return
+
+    const screenX = Math.round((relX / rect.width) * screenWidth)
+    const screenY = Math.round((relY / rect.height) * screenHeight)
+
+    if (screenX < cropLeft || screenX > cropRight || screenY < cropTop || screenY > cropBottom) {
+      setStatus('Click inside the soundtrack crop region to sample DMIN.')
+      return
+    }
+
+    try {
+      const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
+      const sampleX = Math.max(0, Math.min(Math.round(screenX - cropLeft), Math.max(cropRight - cropLeft - 1, 0)))
+      const sampleY = Math.max(0, Math.min(Math.round(screenY - cropTop), Math.max(cropBottom - cropTop - 1, 0)))
+      const params = new URLSearchParams({
+        top: imgCrop.top,
+        bottom: imgCrop.bottom,
+        left: imgCrop.left,
+        right: imgCrop.right,
+        rotate,
+        negative,
+        soundtrack_color: soundtrackColor,
+        sample_x: sampleX,
+        sample_y: sampleY,
+      }).toString()
+      const res = await fetch(`${API}/api/frame/${frameIndex}/estimate-dmin?${params}`)
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Failed to estimate DMIN')
+      }
+      const data = await res.json()
+      setDminValue(Number(data.dmin))
+      setDminPickPoint({ x: screenX, y: screenY })
+      setPickingDmin(false)
+      setStatus(`Estimated DMIN=${Number(data.dmin).toFixed(4)} from picked point (${data.point_x}, ${data.point_y})`)
+    } catch (e) {
+      setPickingDmin(false)
+      setStatus(`Error estimating DMIN: ${e.message}`)
+    }
+  }, [pickingDmin, loaded, cropTop, cropBottom, cropLeft, cropRight, rotate, soundtrackColor, frameIndex, screenWidth, screenHeight])
+
   const handleExtract = useCallback(async () => {
     setExtracting(true)
     setExtractProgress(null)
-    setStatus('Starting extraction...')
+
+    const rangeStart = Math.max(0, Math.min(startFrame, endFrame))
+    const rangeEnd = Math.min(numFrames - 1, Math.max(startFrame, endFrame))
+    setFrameIndex(reverse ? rangeEnd : rangeStart)
+    setStatus(`Starting extraction for frames ${rangeStart}-${rangeEnd}...`)
+
     try {
       const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
       const res = await fetch(`${API}/api/extract`, {
@@ -356,8 +669,15 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
-          rotate, negative, lift, gamma, gain, threshold,
-          fps, sample_rate: sampleRate, hpf, lpf, overlap, reverse,
+          rotate, negative,
+          dmin_value: dminValue,
+          dmin_headroom: dminHeadroom,
+          binary_mask: binaryMask,
+          binary_lb: binaryLb,
+          binary_ub: binaryUb,
+          integrate,
+          fps, sample_rate: sampleRate, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
+          soundtrack_color: soundtrackColor,
           stereo,
           start_frame: startFrame,
           end_frame: endFrame,
@@ -376,12 +696,19 @@ function App() {
           es.onmessage = (ev) => {
             const data = JSON.parse(ev.data)
             setExtractProgress(data)
+
+            const completed = Math.max(0, Math.min(data.current ?? 0, data.total ?? 0))
+            const currentFrame = reverse
+              ? Math.max(rangeStart, rangeEnd - Math.max(completed - 1, 0))
+              : Math.min(rangeEnd, rangeStart + Math.max(completed - 1, 0))
+
             if (data.total > 0 && data.current < data.total) {
-              const pct = Math.round((data.current / data.total) * 100)
-              setStatus(`${data.phase}: ${data.current} / ${data.total} (${pct}%)`)
-              setFrameIndex(Math.min(data.current, numFrames - 1))
+              const pct = Math.round((completed / data.total) * 100)
+              setStatus(`${data.phase}: frame ${currentFrame} of range ${rangeStart}-${rangeEnd} • ${completed} / ${data.total} (${pct}%)`)
+              setFrameIndex(currentFrame)
             } else if (data.phase && !data.done) {
-              setStatus(`${data.phase}...`)
+              setStatus(`${data.phase}: frame ${currentFrame} of range ${rangeStart}-${rangeEnd}...`)
+              setFrameIndex(currentFrame)
             }
             if (data.done) {
               es.close()
@@ -416,27 +743,164 @@ function App() {
         connect()
       })
 
-      // Download the result
-      const wavRes = await fetch(`${API}/api/extract/result`)
-      if (!wavRes.ok) {
-        const err = await wavRes.json()
-        throw new Error(err.detail || 'Failed to download result')
+      if (hasNativeBrowse) {
+        // Blob + <a download> navigates the packaged app's webview to the
+        // blob: URL instead of downloading it, breaking the UI — use the
+        // native Save panel and let the backend write directly to disk.
+        const path = await window.pywebview.api.choose_save_path('output.wav', ['WAV Audio (*.wav)'])
+        if (!path) {
+          setStatus('Save cancelled')
+          return
+        }
+        const saveRes = await fetch(`${API}/api/extract/result?save_path=${encodeURIComponent(path)}`)
+        if (!saveRes.ok) {
+          const err = await saveRes.json()
+          throw new Error(err.detail || 'Failed to save result')
+        }
+        setStatus(`Extraction complete — saved to ${path}`)
+      } else {
+        // Download the result
+        const wavRes = await fetch(`${API}/api/extract/result`)
+        if (!wavRes.ok) {
+          const err = await wavRes.json()
+          throw new Error(err.detail || 'Failed to download result')
+        }
+        const blob = await wavRes.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'output.wav'
+        a.click()
+        URL.revokeObjectURL(url)
+        setStatus('Extraction complete — WAV downloaded')
       }
-      const blob = await wavRes.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'output.wav'
-      a.click()
-      URL.revokeObjectURL(url)
-      setStatus('Extraction complete — WAV downloaded')
     } catch (e) {
       setStatus(`Error: ${e.message}`)
     } finally {
       setExtracting(false)
       setExtractProgress(null)
     }
-  }, [cropTop, trackHeight, cropLeft, cropRight, rotate, negative, lift, gamma, gain, threshold, fps, sampleRate, hpf, lpf, overlap, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+
+  const handleExportVideo = useCallback(async () => {
+    setExportingVideo(true)
+    setExportVideoStatus('Starting...')
+    setExportVideoProgress(null)
+    setStatus('Starting video export...')
+
+    try {
+      const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
+      const res = await fetch(`${API}/api/export/video`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
+          rotate, negative,
+          dmin_value: dminValue,
+          dmin_headroom: dminHeadroom,
+          binary_mask: binaryMask,
+          binary_lb: binaryLb,
+          binary_ub: binaryUb,
+          integrate,
+          fps, sample_rate: sampleRate, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
+          soundtrack_color: soundtrackColor,
+          stereo,
+          start_frame: startFrame,
+          end_frame: endFrame,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Video export failed to start')
+      }
+
+      // Listen for SSE progress (auto-reconnects on transient drops)
+      await new Promise((resolve, reject) => {
+        let resolved = false
+        const connect = () => {
+          const es = new EventSource(`${API}/api/export/video/progress`)
+          es.onmessage = (ev) => {
+            const data = JSON.parse(ev.data)
+            setExportVideoProgress(data)
+
+            if (data.total > 0 && data.current < data.total) {
+              const pct = Math.round((data.current / data.total) * 100)
+              const text = `${data.phase}: ${data.current} / ${data.total} (${pct}%)`
+              setExportVideoStatus(text)
+              setStatus(text)
+            } else if (data.phase && !data.done) {
+              setExportVideoStatus(data.phase)
+              setStatus(data.phase)
+            }
+            if (data.done) {
+              es.close()
+              if (!resolved) {
+                resolved = true
+                data.error ? reject(new Error(data.error)) : resolve()
+              }
+            }
+          }
+          es.onerror = () => {
+            es.close()
+            if (resolved) return
+            setTimeout(() => {
+              if (resolved) return
+              fetch(`${API}/api/export/video/progress`)
+                .then(r => {
+                  if (!r.ok) throw new Error('Server gone')
+                  connect()
+                })
+                .catch(() => {
+                  if (!resolved) {
+                    resolved = true
+                    reject(new Error('Lost connection to server'))
+                  }
+                })
+            }, 1000)
+          }
+        }
+        connect()
+      })
+
+      if (hasNativeBrowse) {
+        // Blob + <a download> navigates the packaged app's webview to the
+        // blob: URL instead of downloading it, breaking the UI — use the
+        // native Save panel and let the backend write directly to disk.
+        const path = await window.pywebview.api.choose_save_path('output.mp4', ['MP4 Video (*.mp4)'])
+        if (!path) {
+          setStatus('Save cancelled')
+          return
+        }
+        const saveRes = await fetch(`${API}/api/export/video/result?save_path=${encodeURIComponent(path)}`)
+        if (!saveRes.ok) {
+          const err = await saveRes.json()
+          throw new Error(err.detail || 'Failed to save result')
+        }
+        setStatus(`Video export complete — saved to ${path}`)
+      } else {
+        // Download the result
+        const videoRes = await fetch(`${API}/api/export/video/result`)
+        if (!videoRes.ok) {
+          const err = await videoRes.json()
+          throw new Error(err.detail || 'Failed to download result')
+        }
+        const blob = await videoRes.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = 'output.mp4'
+        a.click()
+        URL.revokeObjectURL(url)
+        setStatus('Video export complete — MP4 downloaded')
+      }
+    } catch (e) {
+      setStatus(`Error: ${e.message}`)
+      setExportVideoStatus(`Error: ${e.message}`)
+    } finally {
+      setExportingVideo(false)
+      setExportVideoProgress(null)
+    }
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame])
 
   return (
     <div className="app">
@@ -445,6 +909,12 @@ function App() {
         <div className="load-overlay">
           <div className="load-dialog">
             <h2>Load Frames</h2>
+            {hasNativeBrowse && (
+              <div className="browse-actions">
+                <button className="btn-secondary" onClick={handleBrowseFolder}>Browse Folder…</button>
+                <button className="btn-secondary" onClick={handleBrowseVideo}>Browse Video File…</button>
+              </div>
+            )}
             <input
               type="text"
               value={inputDir}
@@ -455,7 +925,7 @@ function App() {
             {loadError && <p className="error">{loadError}</p>}
             <div className="actions">
               {loaded && <button className="btn-secondary" onClick={() => setShowLoad(false)}>Cancel</button>}
-              <button className="btn-primary" onClick={loadProject}>Load</button>
+              <button className="btn-primary" onClick={() => loadProject()}>Load</button>
             </div>
           </div>
         </div>
@@ -463,102 +933,249 @@ function App() {
 
       {/* Header */}
       <div className="header">
-        <h1>Optical2Digital</h1>
-        {loaded && (
-          <>
-            <span className="project-info">{numFrames} frames • {frameWidth}×{frameHeight}</span>
-            <button className="btn-secondary btn-small" onClick={() => setShowLoad(true)}>Change</button>
-          </>
-        )}
+        <div className="header-top">
+          <h1>Optical2Digital</h1>
+          {loaded && (
+            <>
+              <span className="project-info">{numFrames} frames • {frameWidth}×{frameHeight}</span>
+              <div className="header-actions">
+                <button className="btn-secondary btn-small" onClick={handleExportSettings}>
+                  Save Settings
+                </button>
+                <button className="btn-secondary btn-small" onClick={() => importSettingsRef.current?.click()}>
+                  Load Settings
+                </button>
+                <button className="btn-secondary btn-small" onClick={() => setShowLoad(true)}>Change</button>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="header-tabs tab-bar">
+          <button type="button" className={activePanel === 'crop' ? 'active' : undefined} onClick={() => setActivePanel('crop')}>Crop Region</button>
+          <button type="button" className={activePanel === 'corrections' ? 'active' : undefined} onClick={() => setActivePanel('corrections')}>Image Corrections</button>
+          <button type="button" className={activePanel === 'audio' ? 'active' : undefined} onClick={() => setActivePanel('audio')}>Audio Settings</button>
+          <button type="button" className={activePanel === 'export' ? 'active' : undefined} onClick={() => setActivePanel('export')}>Export</button>
+        </div>
       </div>
 
       <div className="main">
         {/* Sidebar */}
         <div className="sidebar">
+          {/* Pixel value mode — always visible, shared across all panels */}
+          <div className="mode-toggle" role="radiogroup" aria-label="Pixel value mode">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={integrate}
+              className={integrate ? 'active' : undefined}
+              onClick={() => setIntegrate(true)}
+            >
+              Average Pixel Value
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!integrate}
+              className={!integrate ? 'active' : undefined}
+              onClick={() => setIntegrate(false)}
+            >
+              Binary Pixel Value
+            </button>
+          </div>
+
           {/* Crop */}
-          <section>
-            <h3>Crop Region</h3>
-            <div className="control-group">
-              <NumberInput label="Top" value={cropTop} onChange={setCropTop} min={0} max={screenHeight - trackHeight} />
-              <NumberInput label="Track Height" value={trackHeight} onChange={setTrackHeight} min={10} max={screenHeight} />
-              <NumberInput label="Left" value={cropLeft} onChange={setCropLeft} min={0} max={screenWidth} />
-              <NumberInput label="Right" value={cropRight} onChange={setCropRight} min={0} max={screenWidth} />
-            </div>
-          </section>
+          {activePanel === 'crop' && (
+            <section>
+              <h3>Crop Region</h3>
+              <div className="control-group">
+                <NumberInput label="Top" value={cropTop} onChange={setCropTop} min={0} max={screenHeight - trackHeight} />
+                <NumberInput label="Track Height" value={trackHeight} onChange={setTrackHeight} min={10} max={screenHeight} />
+                <NumberInput label="Left" value={cropLeft} onChange={setCropLeft} min={0} max={screenWidth} />
+                <NumberInput label="Right" value={cropRight} onChange={setCropRight} min={0} max={screenWidth} />
+                <div className="checkbox-row">
+                  <input type="checkbox" id="show-zoom" checked={showZoom} onChange={e => setShowZoom(e.target.checked)} />
+                  <label htmlFor="show-zoom">Show Hover Zoom</label>
+                </div>
+                <SliderInput label="Zoom ×" value={zoomLevel} onChange={setZoomLevel} min={2} max={12} step={0.5} />
+              </div>
+            </section>
+          )}
+
+          <input
+            ref={importSettingsRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleImportSettingsFile}
+            style={{ display: 'none' }}
+          />
 
           {/* Rotation */}
-          <section>
-            <h3>Rotation</h3>
-            <div className="control-row">
-              <label>Degrees CW</label>
-              <select value={rotate} onChange={e => setRotate(Number(e.target.value))}>
-                <option value={0}>0°</option>
-                <option value={90}>90°</option>
-                <option value={180}>180°</option>
-                <option value={270}>270°</option>
-              </select>
-            </div>
-          </section>
+          {activePanel === 'crop' && (
+            <section>
+              <h3>Rotation</h3>
+              <div className="control-row">
+                <label>Degrees CW</label>
+                <select value={rotate} onChange={e => setRotate(Number(e.target.value))}>
+                  <option value={0}>0°</option>
+                  <option value={90}>90°</option>
+                  <option value={180}>180°</option>
+                  <option value={270}>270°</option>
+                </select>
+              </div>
+            </section>
+          )}
 
           {/* Corrections */}
-          <section>
-            <h3>Image Corrections</h3>
-            <div className="control-group">
-              <div className="checkbox-row">
-                <input type="checkbox" id="neg" checked={negative} onChange={e => setNegative(e.target.checked)} />
-                <label htmlFor="neg">Negative inversion</label>
+          {activePanel === 'corrections' && (
+            <section>
+              <h3>Image Corrections</h3>
+              <div className="control-group">
+                <div className="checkbox-row">
+                  <input type="checkbox" id="neg" checked={negative} onChange={e => setNegative(e.target.checked)} />
+                  <label htmlFor="neg">Negative inversion</label>
+                </div>
+                <NumberInput label="Dmin Value" value={dminValue} onChange={setDminValue} min={0.001} max={2.0} step={0.001} />
+                <button className="btn-secondary btn-small" onClick={handleEstimateDmin} disabled={!loaded || extracting}>
+                  {pickingDmin ? 'Cancel DMIN Picker' : 'Pick DMIN from Image'}
+                </button>
+                {pickingDmin && (
+                  <p className="hint">Click inside the crop region to sample DMIN.</p>
+                )}
+                <SliderInput label="Dmin Headroom" value={dminHeadroom} onChange={setDminHeadroom} min={0} max={0.5} step={0.01} />
+                {!integrate && (
+                  <>
+                    <div className="checkbox-row">
+                      <input type="checkbox" id="binary-mask" checked={binaryMask} onChange={e => setBinaryMask(e.target.checked)} />
+                      <label htmlFor="binary-mask">Binary mask cleanup</label>
+                    </div>
+                    <NumberInput label="Binary LB" value={binaryLb} onChange={setBinaryLb} min={0} max={255} />
+                    <NumberInput label="Binary UB" value={binaryUb} onChange={setBinaryUb} min={0} max={255} />
+                  </>
+                )}
               </div>
-              <SliderInput label="Lift" value={lift} onChange={setLift} min={-1} max={1} step={0.01} />
-              <SliderInput label="Gamma" value={gamma} onChange={setGamma} min={0.1} max={5} step={0.05} />
-              <SliderInput label="Gain" value={gain} onChange={setGain} min={0} max={5} step={0.05} />
-              <SliderInput label="S-Curve" value={threshold} onChange={setThreshold} min={0} max={20} step={0.5} />
-            </div>
-          </section>
+            </section>
+          )}
 
           {/* Audio / Extraction */}
-          <section>
-            <h3>Audio Settings</h3>
-            <div className="control-group">
-              <NumberInput label="FPS" value={fps} onChange={setFps} min={1} max={120} step={0.001} />
-              <NumberInput label="Sample Rate" value={sampleRate} onChange={setSampleRate} min={8000} max={192000} />
-              <SliderInput label="HPF (Hz)" value={hpf} onChange={setHpf} min={0} max={500} step={1} />
-              <SliderInput label="LPF (Hz)" value={lpf} onChange={setLpf} min={1000} max={24000} step={100} />
-              <SliderInput label="Overlap" value={overlap} onChange={setOverlap} min={0} max={0.5} step={0.01} />
-              <div className="checkbox-row">
-                <input type="checkbox" id="rev" checked={reverse} onChange={e => setReverse(e.target.checked)} />
-                <label htmlFor="rev">Reverse frame order</label>
+          {activePanel === 'audio' && (
+            <section>
+              <h3>Audio Settings</h3>
+              <div className="control-group">
+                <NumberInput label="FPS" value={fps} onChange={setFps} min={1} max={120} step={0.001} />
+                <NumberInput label="Sample Rate" value={sampleRate} onChange={setSampleRate} min={8000} max={192000} />
+                <SliderInput label="HPF (Hz)" value={hpf} onChange={setHpf} min={0} max={500} step={1} />
+                <SliderInput label="LPF (Hz)" value={lpf} onChange={setLpf} min={1000} max={24000} step={100} />
+                <SliderInput label="Overlap" value={overlap} onChange={setOverlap} min={0} max={0.5} step={0.01} />
+                <NumberInput label="Audio Offset (frames)" value={audioOffset} onChange={setAudioOffset} min={-500} max={500} />
+                <div className="control-row">
+                  <label>Soundtrack Color</label>
+                  <select value={soundtrackColor} onChange={e => setSoundtrackColor(e.target.value)}>
+                    <option value="B&W">B&W</option>
+                    <option value="High-Magenta">High-Magenta</option>
+                    <option value="Cyan">Cyan</option>
+                  </select>
+                </div>
+                <div className="checkbox-row">
+                  <input type="checkbox" id="rev" checked={reverse} onChange={e => setReverse(e.target.checked)} />
+                  <label htmlFor="rev">Reverse frame order</label>
+                </div>
+                <div className="checkbox-row">
+                  <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
+                  <label htmlFor="stereo">Stereo (split L/R)</label>
+                </div>
+                <div className="checkbox-row">
+                  <input type="checkbox" id="stereo-guides" checked={showStereoGuides} onChange={e => setShowStereoGuides(e.target.checked)} />
+                  <label htmlFor="stereo-guides">Show Centerlines</label>
+                </div>
               </div>
-              <div className="checkbox-row">
-                <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
-                <label htmlFor="stereo">Stereo (split L/R)</label>
-              </div>
-              <NumberInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} />
-              <NumberInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} />
-            </div>
-          </section>
+            </section>
+          )}
 
-          {/* Extract */}
-          <section className="extract-section">
-            <h3>Extract</h3>
-            <button className="btn-primary" onClick={handleExtract} disabled={!loaded || extracting}>
-              {extracting ? 'Extracting...' : 'Extract Audio'}
-            </button>
-            {extracting && extractProgress && extractProgress.total > 0 && (
-              <div className="progress-bar">
-                <div
-                  className="progress-bar-fill"
-                  style={{ width: `${Math.round((extractProgress.current / extractProgress.total) * 100)}%` }}
-                />
-              </div>
-            )}
-          </section>
+          {/* Start/End frame — always visible, shared across all panels */}
+          <div className="control-group">
+            <NumberInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} />
+            <NumberInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} />
+          </div>
+
+          {/* Export */}
+          {activePanel === 'export' && (
+            <section className="extract-section">
+              <h3>Export WAV</h3>
+              <button className="btn-primary" onClick={handleExtract} disabled={!loaded || extracting || exportingVideo}>
+                {extracting ? 'Extracting...' : 'Export Audio (WAV)'}
+              </button>
+              <p className="hint" style={{ marginTop: 8 }}>
+                Channel in use: {soundtrackChannelLabel(soundtrackColor)}
+              </p>
+              {extracting && extractProgress && extractProgress.total > 0 && (
+                <div className="progress-bar">
+                  <div
+                    className="progress-bar-fill"
+                    style={{ width: `${Math.round((extractProgress.current / extractProgress.total) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </section>
+          )}
+
+          {activePanel === 'export' && isVideoSource && (
+            <section className="extract-section">
+              <h3>Export Video</h3>
+              <p className="hint">
+                Replaces the audio track of the original video with the extracted soundtrack, trimmed to the Start/End Frame range above. The picture is copied without re-encoding.
+              </p>
+              <button className="btn-primary" onClick={handleExportVideo} disabled={!loaded || extracting || exportingVideo}>
+                {exportingVideo ? 'Exporting...' : 'Export Video (MP4)'}
+              </button>
+              {exportingVideo && (
+                <p className="hint" style={{ marginTop: 8 }}>{exportVideoStatus}</p>
+              )}
+              {exportingVideo && exportVideoProgress && exportVideoProgress.total > 0 && (
+                <div className="progress-bar">
+                  <div
+                    className="progress-bar-fill"
+                    style={{ width: `${Math.round((exportVideoProgress.current / exportVideoProgress.total) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </section>
+          )}
+
+          {activePanel === 'export' && !isVideoSource && (
+            <section className="extract-section">
+              <h3>Export Video</h3>
+              <p className="hint">
+                Renders the full original scan frames (Start/End Frame range, at the FPS above, with Rotation applied) into a new video with the extracted soundtrack as its audio.
+              </p>
+              <button className="btn-primary" onClick={handleExportVideo} disabled={!loaded || extracting || exportingVideo}>
+                {exportingVideo ? 'Exporting...' : 'Export Video (MP4)'}
+              </button>
+              {exportingVideo && (
+                <p className="hint" style={{ marginTop: 8 }}>{exportVideoStatus}</p>
+              )}
+              {exportingVideo && exportVideoProgress && exportVideoProgress.total > 0 && (
+                <div className="progress-bar">
+                  <div
+                    className="progress-bar-fill"
+                    style={{ width: `${Math.round((exportVideoProgress.current / exportVideoProgress.total) * 100)}%` }}
+                  />
+                </div>
+              )}
+            </section>
+          )}
         </div>
 
         {/* Preview with interactive crop overlay */}
         <div className="preview-area">
           <div className="crop-canvas">
             {loaded && rawUrl ? (
-              <div className="image-wrapper">
+              <div
+                className="image-wrapper"
+                onClick={handlePreviewClick}
+                onMouseMove={handlePreviewMouseMove}
+                onMouseLeave={handlePreviewMouseLeave}
+                style={{ cursor: pickingDmin ? 'crosshair' : undefined }}
+              >
                 <img ref={imgRef} src={rawSrc} alt={`Frame ${frameIndex}`} className="base-image" />
                 {/* Corrected image clipped to crop region */}
                 {correctedSrc && <img
@@ -586,23 +1203,173 @@ function App() {
                 {/* Frame boundary lines — full width */}
                 <div className="frame-line" style={{ top: `${topPct}%` }} />
                 <div className="frame-line" style={{ top: `${bottomPct}%` }} />
-                {/* Stereo center line */}
+                {/* Channel guide lines */}
                 {stereo && (
                   <div className="stereo-center-line" style={{
-                    top: `${topPct}%`, left: `${(leftPct + rightPct) / 2}%`,
+                    top: `${topPct}%`, left: `${stereoMidPct}%`,
                     height: `${bottomPct - topPct}%`,
                   }} />
+                )}
+                {showStereoGuides && (
+                  <>
+                    {stereo ? (
+                      <>
+                        <div className="stereo-guide-line" style={{
+                          top: `${topPct}%`, left: `${stereoLeftGuidePct}%`,
+                          height: `${bottomPct - topPct}%`,
+                        }} />
+                        <div className="stereo-guide-line" style={{
+                          top: `${topPct}%`, left: `${stereoRightGuidePct}%`,
+                          height: `${bottomPct - topPct}%`,
+                        }} />
+                      </>
+                    ) : (
+                      <div className="stereo-guide-line" style={{
+                        top: `${topPct}%`, left: `${stereoMidPct}%`,
+                        height: `${bottomPct - topPct}%`,
+                      }} />
+                    )}
+                  </>
                 )}
                 {/* Crop border */}
                 <div className="crop-border" style={{
                   top: `${topPct}%`, left: `${leftPct}%`,
                   width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%`,
                 }} />
+                {showZoom && hoverZoom && rawSrc && (
+                  <>
+                    <div
+                      className="zoom-focus-box"
+                      style={{
+                        top: `${(hoverZoom.screenY / Math.max(screenHeight, 1)) * 100}%`,
+                        left: `${(hoverZoom.screenX / Math.max(screenWidth, 1)) * 100}%`,
+                        width: `${zoomFocusSize}px`,
+                        height: `${zoomFocusSize}px`,
+                      }}
+                    />
+                    <div
+                      className="zoom-panel"
+                      style={{
+                        left: `${zoomPanelLeft}px`,
+                        top: `${zoomPanelTop}px`,
+                      }}
+                    >
+                      <div
+                        className="zoom-scene"
+                        style={{
+                          width: `${hoverZoom.renderedWidth}px`,
+                          height: `${hoverZoom.renderedHeight}px`,
+                          transform: `translate(${zoomTranslateX}px, ${zoomTranslateY}px) scale(${zoomLevel})`,
+                        }}
+                      >
+                        <img src={rawSrc} alt="" className="zoom-image" />
+                        {correctedSrc && (
+                          <img
+                            src={correctedSrc}
+                            alt=""
+                            className="corrected-image"
+                            style={{ clipPath: `inset(${topPct}% ${100 - rightPct}% ${100 - bottomPct}% ${leftPct}%)` }}
+                          />
+                        )}
+                        {overlapPx > 0 && (
+                          <>
+                            <div className="overlap-zone" style={{
+                              top: `${overlapTopPct}%`, left: `${leftPct}%`,
+                              width: `${rightPct - leftPct}%`, height: `${topPct - overlapTopPct}%`,
+                            }} />
+                            <div className="overlap-zone" style={{
+                              top: `${bottomPct}%`, left: `${leftPct}%`,
+                              width: `${rightPct - leftPct}%`, height: `${overlapBottomPct - bottomPct}%`,
+                            }} />
+                          </>
+                        )}
+                        <div className="crop-dim" style={{ top: 0, left: 0, right: 0, height: `${topPct}%` }} />
+                        <div className="crop-dim" style={{ bottom: 0, left: 0, right: 0, height: `${100 - bottomPct}%` }} />
+                        <div className="crop-dim" style={{ top: `${topPct}%`, left: 0, width: `${leftPct}%`, bottom: `${100 - bottomPct}%` }} />
+                        <div className="crop-dim" style={{ top: `${topPct}%`, right: 0, width: `${100 - rightPct}%`, bottom: `${100 - bottomPct}%` }} />
+                        <div className="frame-line" style={{ top: `${topPct}%` }} />
+                        <div className="frame-line" style={{ top: `${bottomPct}%` }} />
+                        {stereo && (
+                          <div className="stereo-center-line" style={{
+                            top: `${topPct}%`, left: `${stereoMidPct}%`,
+                            height: `${bottomPct - topPct}%`,
+                          }} />
+                        )}
+                        {showStereoGuides && (
+                          <>
+                            {stereo ? (
+                              <>
+                                <div className="stereo-guide-line" style={{
+                                  top: `${topPct}%`, left: `${stereoLeftGuidePct}%`,
+                                  height: `${bottomPct - topPct}%`,
+                                }} />
+                                <div className="stereo-guide-line" style={{
+                                  top: `${topPct}%`, left: `${stereoRightGuidePct}%`,
+                                  height: `${bottomPct - topPct}%`,
+                                }} />
+                              </>
+                            ) : (
+                              <div className="stereo-guide-line" style={{
+                                top: `${topPct}%`, left: `${stereoMidPct}%`,
+                                height: `${bottomPct - topPct}%`,
+                              }} />
+                            )}
+                          </>
+                        )}
+                        <div className="crop-border" style={{
+                          top: `${topPct}%`, left: `${leftPct}%`,
+                          width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%`,
+                        }} />
+                        {dminPickPoint && (
+                          <div
+                            style={{
+                              position: 'absolute',
+                              top: `${(dminPickPoint.y / screenHeight) * 100}%`,
+                              left: `${(dminPickPoint.x / screenWidth) * 100}%`,
+                              width: 14,
+                              height: 14,
+                              borderRadius: '50%',
+                              border: '2px solid #ffd166',
+                              boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.65)',
+                              transform: 'translate(-50%, -50%)',
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                      </div>
+                      <div className="zoom-crosshair zoom-crosshair-h" />
+                      <div className="zoom-crosshair zoom-crosshair-v" />
+                      <div className="zoom-label">
+                        Zoom ×{zoomLevel.toFixed(1)} • x {hoverZoom.screenX}, y {hoverZoom.screenY}
+                      </div>
+                    </div>
+                  </>
+                )}
+                {dminPickPoint && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: `${(dminPickPoint.y / screenHeight) * 100}%`,
+                      left: `${(dminPickPoint.x / screenWidth) * 100}%`,
+                      width: 14,
+                      height: 14,
+                      borderRadius: '50%',
+                      border: '2px solid #ffd166',
+                      boxShadow: '0 0 0 1px rgba(0, 0, 0, 0.65)',
+                      transform: 'translate(-50%, -50%)',
+                      pointerEvents: 'none',
+                    }}
+                  />
+                )}
                 {/* Draggable move area */}
                 <div
                   className="crop-move-area"
                   style={{ top: `${topPct}%`, left: `${leftPct}%`, width: `${rightPct - leftPct}%`, height: `${bottomPct - topPct}%` }}
-                  onMouseDown={e => { e.preventDefault(); setDragState({ type: 'move', startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight }) }}
+                  onMouseDown={e => {
+                    if (pickingDmin) return
+                    e.preventDefault()
+                    setDragState({ type: 'move', startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight })
+                  }}
                 />
                 {/* Corner + edge drag handles — vertical handles move box, horizontal resize width */}
                 {[
@@ -618,7 +1385,12 @@ function App() {
                   <div
                     key={h.type} className="crop-handle"
                     style={{ top: `${h.top}%`, left: `${h.left}%`, transform: 'translate(-50%, -50%)', cursor: h.cursor }}
-                    onMouseDown={e => { e.preventDefault(); e.stopPropagation(); setDragState({ type: h.type, startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight }) }}
+                    onMouseDown={e => {
+                      if (pickingDmin) return
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setDragState({ type: h.type, startX: e.clientX, startY: e.clientY, origTop: cropTop, origBottom: cropBottom, origLeft: cropLeft, origRight: cropRight })
+                    }}
                   />
                 ))}
               </div>
@@ -665,12 +1437,12 @@ function SliderInput({ label, value, onChange, min, max, step }) {
   )
 }
 
-function NumberInput({ label, value, onChange, min, max, step }) {
+function NumberInput({ label, value, onChange, min, max, step, disabled }) {
   return (
-    <div className="control-row">
+    <div className="control-row" style={disabled ? { opacity: 0.4 } : undefined}>
       <label>{label}</label>
       <input type="number" min={min} max={max} step={step || 1} value={value}
-        onChange={e => onChange(Number(e.target.value))} />
+        onChange={e => onChange(Number(e.target.value))} disabled={disabled} />
     </div>
   )
 }

@@ -1,0 +1,107 @@
+name: Release
+
+# Builds the packaged app(s) and publishes a GitHub Release whenever a
+# version tag (v*) is pushed. Also runnable by hand via workflow_dispatch
+# to sanity-check a build without cutting a real release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: Build macOS (.dmg)
+    runs-on: macos-latest
+    permissions:
+      contents: write # needed to create the release and upload the dmg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # packaging/build-macos.sh (`source .venv/bin/activate`) expects the
+      # venv to already exist — recreate it exactly as README.md's
+      # "Setup (development)" section documents.
+      - name: Create Python virtualenv
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller
+
+      # The two external tools packaging/bundle_ffmpeg_macos.sh requires
+      # (it errors out by name if either is missing). Both are available
+      # via Homebrew, which is preinstalled on GitHub's macOS runners.
+      - name: Install ffmpeg + dylibbundler
+        run: brew install ffmpeg dylibbundler
+
+      # Does the frontend build, ffmpeg bundling, icon generation,
+      # PyInstaller build, and dmg creation in one shot — see the script
+      # for details. Produces packaging/dist/Optical2Digital.dmg.
+      - name: Build app + dmg
+        run: ./packaging/build-macos.sh
+
+      # Only publish on an actual tag push — workflow_dispatch runs (used
+      # to test the build itself) have no tag to attach a release to.
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/dist/Optical2Digital.dmg
+          generate_release_notes: true
+
+  # --- Placeholders -----------------------------------------------------
+  # Not implemented yet. Each is a real job (so it shows up in the Actions
+  # UI and the job matrix is already in place) that just no-ops — filling
+  # in a platform later means adding steps here, following the
+  # build-macos job above as the pattern, not redesigning the workflow.
+  # None of these gate or depend on build-macos, so a placeholder never
+  # blocks or fails the macOS release.
+
+  build-windows-x64:
+    name: Build Windows (x64) [placeholder]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: TODO
+        shell: bash
+        run: |
+          echo "TODO: implement Windows x64 build (see build-macos job for the pattern)"
+
+  build-windows-arm64:
+    name: Build Windows (arm64) [placeholder]
+    # Placeholder runs on the standard runner for now so it reliably
+    # succeeds; swap to an ARM64-capable runner (e.g. windows-11-arm)
+    # once this job is actually implemented.
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: TODO
+        shell: bash
+        run: |
+          echo "TODO: implement Windows arm64 build (see build-macos job for the pattern)"
+
+  build-linux:
+    name: Build Linux [placeholder]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: TODO
+        run: |
+          echo "TODO: implement Linux build (see build-macos job for the pattern)"
