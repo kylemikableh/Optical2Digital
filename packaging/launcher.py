@@ -54,13 +54,22 @@ class Api:
     def choose_save_path(self, default_filename="", file_types=()):
         """Native Save panel — returns the chosen destination path, or
         None if cancelled. Used for large binary results (WAV/MP4) whose
-        bytes stay server-side; only the path crosses the JS bridge."""
+        bytes stay server-side; only the path crosses the JS bridge.
+
+        Unlike OPEN/FOLDER, pywebview's SAVE dialog doesn't consistently
+        return a `(path,)` tuple across backends — on macOS/Cocoa it
+        returns a bare path string (`self._file_name = save_dlg.filename()`
+        in webview/platforms/cocoa.py), which `result[0]` would silently
+        mangle into just its first character ("/"). Handle both shapes.
+        """
         result = webview.windows[0].create_file_dialog(
             FileDialog.SAVE,
             save_filename=default_filename,
             file_types=tuple(file_types),
         )
-        return result[0] if result else None
+        if not result:
+            return None
+        return result if isinstance(result, str) else result[0]
 
     def save_text_file(self, default_filename, content):
         """Save panel + direct write, for small client-generated text
