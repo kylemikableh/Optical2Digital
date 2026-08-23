@@ -22,11 +22,34 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import uvicorn
 import webview
+from webview import FileDialog
 
 import server as server_module
 
 HOST = "127.0.0.1"
 PORT = 8000
+
+
+class Api:
+    """Bound to the webview window as `js_api` so the frontend can invoke
+    native file/folder pickers via `window.pywebview.api.<method>()`.
+
+    pywebview has no dialog mode that lets a user pick either a file or a
+    folder at once, so the frontend exposes two separate entry points
+    instead — one per source type `KylesOpticalDecoder.open_source()`
+    accepts (an image-sequence directory, or a video file).
+    """
+
+    def choose_folder(self):
+        result = webview.windows[0].create_file_dialog(FileDialog.FOLDER)
+        return result[0] if result else None
+
+    def choose_video_file(self):
+        result = webview.windows[0].create_file_dialog(
+            FileDialog.OPEN,
+            file_types=("Video Files (*.mp4;*.mov;*.avi;*.mkv)",),
+        )
+        return result[0] if result else None
 
 
 def start_server_thread(app, host=HOST, port=PORT):
@@ -64,7 +87,7 @@ def main():
     if not wait_for_server(url):
         raise RuntimeError(f"Server did not start within timeout at {url}")
 
-    webview.create_window("Optical2Digital", url, width=1280, height=860)
+    webview.create_window("Optical2Digital", url, width=1280, height=860, js_api=Api())
     webview.start()
 
     # Window closed — shut the server down cleanly so no process is left

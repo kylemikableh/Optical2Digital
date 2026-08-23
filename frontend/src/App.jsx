@@ -94,6 +94,7 @@ function App() {
   const [inputDir, setInputDir] = useState('./examples/output/')
   const [showLoad, setShowLoad] = useState(true)
   const [loadError, setLoadError] = useState('')
+  const [hasNativeBrowse, setHasNativeBrowse] = useState(false)
 
   // Crop
   const [cropTop, setCropTop] = useState(297)
@@ -146,14 +147,25 @@ function App() {
   // Sidebar panel selection
   const [activePanel, setActivePanel] = useState('crop')
 
+  // --- Detect the pywebview native-dialog bridge (packaged app only) ---
+  useEffect(() => {
+    if (window.pywebview?.api) {
+      setHasNativeBrowse(true)
+      return
+    }
+    const onReady = () => setHasNativeBrowse(true)
+    window.addEventListener('pywebviewready', onReady)
+    return () => window.removeEventListener('pywebviewready', onReady)
+  }, [])
+
   // --- Load project ---
-  const loadProject = useCallback(async () => {
+  const loadProject = useCallback(async (path = inputDir) => {
     setLoadError('')
     try {
       const res = await fetch(`${API}/api/load`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input_dir: inputDir }),
+        body: JSON.stringify({ input_dir: path }),
       })
       if (!res.ok) {
         const err = await res.json()
@@ -166,7 +178,7 @@ function App() {
       setFrameIndex(0)
 
       // Restore saved settings for this path, or use defaults
-      const saved = loadSettings(inputDir)
+      const saved = loadSettings(path)
       if (saved) {
         setCropTop(saved.cropTop ?? 297)
         setTrackHeight(saved.trackHeight ?? 3070)
@@ -209,6 +221,21 @@ function App() {
       setLoadError(e.message)
     }
   }, [inputDir])
+
+  // --- Native folder/video pickers (packaged app only, via pywebview) ---
+  const handleBrowseFolder = useCallback(async () => {
+    const path = await window.pywebview.api.choose_folder()
+    if (!path) return
+    setInputDir(path)
+    loadProject(path)
+  }, [loadProject])
+
+  const handleBrowseVideo = useCallback(async () => {
+    const path = await window.pywebview.api.choose_video_file()
+    if (!path) return
+    setInputDir(path)
+    loadProject(path)
+  }, [loadProject])
 
   // --- Auto-save settings to localStorage whenever they change ---
   useEffect(() => {
@@ -836,6 +863,12 @@ function App() {
         <div className="load-overlay">
           <div className="load-dialog">
             <h2>Load Frames</h2>
+            {hasNativeBrowse && (
+              <div className="browse-actions">
+                <button className="btn-secondary" onClick={handleBrowseFolder}>Browse Folder…</button>
+                <button className="btn-secondary" onClick={handleBrowseVideo}>Browse Video File…</button>
+              </div>
+            )}
             <input
               type="text"
               value={inputDir}
