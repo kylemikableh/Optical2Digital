@@ -24,6 +24,14 @@ Python CLI tool that can extract film optical audio
 - Node.js 18+
 - ffmpeg (must be on your `PATH`) — required for the Export Video feature (muxing/rendering); install via `brew install ffmpeg` (macOS), your Linux package manager, or from [ffmpeg.org](https://ffmpeg.org/) (Windows). Not required for WAV-only extraction.
 
+## Download the app (macOS)
+
+Grab the latest `Optical2Digital.dmg` from the [Releases page](../../releases), open it, and drag `Optical2Digital.app` to Applications.
+
+**First launch only:** because this build isn't code-signed, macOS will refuse a plain double-click with an "unidentified developer" warning. Instead, right-click (or Control-click) `Optical2Digital.app` and choose **Open**, then confirm in the dialog that appears. After that first launch, it opens normally.
+
+No Python, Node, or ffmpeg install needed — everything required is bundled inside the app.
+
 ### Setup (normal local)
 
 First time: `start-dev-fresh.sh`
@@ -37,7 +45,7 @@ python -m venv .venv
 source .venv/bin/activate   # macOS/Linux
 # .venv\Scripts\activate    # Windows
 
-pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic
+pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller
 ```
 
 **Frontend (React):**

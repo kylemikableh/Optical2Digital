@@ -570,13 +570,29 @@ def _check_loaded():
         raise HTTPException(400, "No project loaded. POST /api/load first.")
 
 
+def _resolve_ffmpeg_path():
+    """Return the ffmpeg executable to use.
+
+    When running as a frozen PyInstaller app (sys.frozen is set), prefer the
+    binary bundled alongside the app by packaging/optical2digital.spec.
+    Otherwise (normal `python server.py`, dev/CLI mode), fall back to
+    whatever's on PATH — exactly the behavior this project had before the
+    packaged-app feature existed.
+    """
+    if getattr(sys, "frozen", False):
+        bundled = pathlib.Path(getattr(sys, "_MEIPASS", "")) / "ffmpeg"
+        if bundled.is_file() and os.access(bundled, os.X_OK):
+            return str(bundled)
+    return shutil.which("ffmpeg")
+
+
 def _check_ffmpeg():
-    if shutil.which("ffmpeg") is None:
+    if _resolve_ffmpeg_path() is None:
         raise HTTPException(
             500,
-            "ffmpeg was not found on the server's PATH. Install ffmpeg "
-            "(e.g. `brew install ffmpeg` on macOS, or see ffmpeg.org) and "
-            "restart the server to enable video export.",
+            "ffmpeg was not found. Install ffmpeg (e.g. `brew install ffmpeg` "
+            "on macOS, or see ffmpeg.org) and restart the server to enable "
+            "video export.",
         )
 
 
@@ -602,7 +618,7 @@ def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_fram
     end_time = (end_frame + 1) / fps
     duration = end_time - start_time
     cmd = [
-        "ffmpeg", "-y",
+        _resolve_ffmpeg_path(), "-y",
         # -ss/-t are per-input options in ffmpeg — they apply to whichever -i
         # follows them, so they must precede the *video* -i, not sit between
         # the two -i flags (which would trim the WAV input instead).
@@ -645,7 +661,7 @@ def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame,
             f.write(f"file '{last_path}'\n")
 
     cmd = [
-        "ffmpeg", "-y",
+        _resolve_ffmpeg_path(), "-y",
         "-f", "concat", "-safe", "0",
         "-i", list_path,
         "-i", wav_path,
