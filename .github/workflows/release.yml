@@ -201,14 +201,23 @@ jobs:
           node-version: "20"
 
       # Mirrors the build-macos job's venv step — this is the platform
-      # where both of its workarounds actually matter: opencv-python has no
-      # win_arm64 wheel at all, so without --no-build-isolation its build
-      # pulls in its own old pinned numpy (also no win_arm64 wheel, fails
-      # to compile from source here), and even once that's fixed, its
+      # where all of its workarounds actually matter: opencv-python has no
+      # win_arm64 wheel at all, so without
+      # --no-build-isolation its build pulls in its own old pinned numpy
+      # (also no win_arm64 wheel, fails to compile from source here); its
       # bundled dnn/ONNX-Runtime module fails to *link* on this toolchain
-      # (unresolved ARM64 MLAS assembly symbols) — hence
-      # CMAKE_ARGS=-DBUILD_opencv_dnn=OFF, see the build-macos job's comment
-      # for the full explanation of both. Plus pillow (build-time-only,
+      # (unresolved ARM64 MLAS assembly symbols), hence
+      # CMAKE_ARGS=-DBUILD_opencv_dnn=OFF (see the build-macos job's comment
+      # for both). And unique to this platform: OpenCV's own ffmpeg
+      # 3rdparty download has no ARM64 entry at all (only x86/x64), so its
+      # ffmpeg videoio plugin DLL can never be built here — but
+      # opencv-python's packaging step unconditionally requires that DLL to
+      # exist for any 64-bit Windows build, so it hard-fails at package time
+      # even though the real compile succeeded. win_arm64_opencv_ffmpeg_
+      # stub.cmake installs a harmless placeholder satisfying that check;
+      # cv2.VideoCapture falls back to the built-in Windows Media
+      # Foundation backend at runtime instead (see the .cmake file's
+      # comment for the full explanation). Plus pillow (build-time-only,
       # used by packaging/make_icon_windows.py to generate icon.ico).
       - name: Create Python virtualenv
         shell: pwsh
@@ -217,7 +226,8 @@ jobs:
           .venv\Scripts\Activate.ps1
           pip install --upgrade pip
           pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pillow
-          $env:CMAKE_ARGS = "-DBUILD_opencv_dnn=OFF"
+          $ffmpegStub = (Resolve-Path "packaging\win_arm64_opencv_ffmpeg_stub.cmake").Path -replace '\\', '/'
+          $env:CMAKE_ARGS = "-DBUILD_opencv_dnn=OFF -DCMAKE_PROJECT_INCLUDE=$ffmpegStub"
           pip install --no-build-isolation opencv-python
 
       - name: Install Inno Setup
