@@ -63,38 +63,108 @@ jobs:
           files: packaging/dist/Optical2Digital.dmg
           generate_release_notes: true
 
-  # --- Placeholders -----------------------------------------------------
-  # Not implemented yet. Each is a real job (so it shows up in the Actions
-  # UI and the job matrix is already in place) that just no-ops — filling
-  # in a platform later means adding steps here, following the
-  # build-macos job above as the pattern, not redesigning the workflow.
-  # None of these gate or depend on build-macos, so a placeholder never
-  # blocks or fails the macOS release.
-
   build-windows-x64:
-    name: Build Windows (x64) [placeholder]
+    name: Build Windows (x64)
     runs-on: windows-latest
+    permissions:
+      contents: write # needed to create the release and upload artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: TODO
-        shell: bash
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Mirrors the build-macos job's venv step, plus pillow (build-time-only,
+      # used by packaging/make_icon_windows.py to generate icon.ico).
+      - name: Create Python virtualenv
+        shell: pwsh
         run: |
-          echo "TODO: implement Windows x64 build (see build-macos job for the pattern)"
+          python -m venv .venv
+          .venv\Scripts\Activate.ps1
+          pip install --upgrade pip
+          pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller pillow
+
+      # windows-latest ships Chocolatey preinstalled; iscc (the Inno Setup
+      # compiler) is what packaging/build-windows.ps1 shells out to.
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      # Does the frontend build, ffmpeg bundling, icon generation,
+      # PyInstaller build, zip, and installer creation in one shot — see
+      # the script for details. Produces packaging/dist/Optical2Digital-win-x64.zip
+      # and packaging/dist/Optical2Digital-Setup-x64.exe.
+      - name: Build app, zip, and installer
+        shell: pwsh
+        run: .\packaging\build-windows.ps1 -Arch x64
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packaging/dist/Optical2Digital-win-x64.zip
+            packaging/dist/Optical2Digital-Setup-x64.exe
+          generate_release_notes: true
 
   build-windows-arm64:
-    name: Build Windows (arm64) [placeholder]
-    # Placeholder runs on the standard runner for now so it reliably
-    # succeeds; swap to an ARM64-capable runner (e.g. windows-11-arm)
-    # once this job is actually implemented.
-    runs-on: windows-latest
+    name: Build Windows (arm64)
+    # GitHub-hosted arm64 Windows runner. VERIFY at implementation/rollout
+    # time: availability, quota, and enrollment requirements for this runner
+    # label may differ from windows-latest and are worth reconfirming before
+    # relying on this for a real release.
+    runs-on: windows-11-arm
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: TODO
-        shell: bash
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # NOTE: arm64 Windows wheel availability for opencv-python/scipy/numpy
+      # has historically lagged behind x64 — if this step fails resolving
+      # wheels (forcing a from-source build with no toolchain present),
+      # that's a real gap to address (e.g. opencv-python-headless, or
+      # descoping arm64) rather than something to silently work around here.
+      - name: Create Python virtualenv
+        shell: pwsh
         run: |
-          echo "TODO: implement Windows arm64 build (see build-macos job for the pattern)"
+          python -m venv .venv
+          .venv\Scripts\Activate.ps1
+          pip install --upgrade pip
+          pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller pillow
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build app, zip, and installer
+        shell: pwsh
+        run: .\packaging\build-windows.ps1 -Arch arm64
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packaging/dist/Optical2Digital-win-arm64.zip
+            packaging/dist/Optical2Digital-Setup-arm64.exe
+          generate_release_notes: true
 
   build-linux:
     name: Build Linux [placeholder]

@@ -592,7 +592,8 @@ def _resolve_ffmpeg_path():
     packaged-app feature existed.
     """
     if getattr(sys, "frozen", False):
-        bundled = pathlib.Path(getattr(sys, "_MEIPASS", "")) / "ffmpeg"
+        binary_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+        bundled = pathlib.Path(getattr(sys, "_MEIPASS", "")) / binary_name
         if bundled.is_file() and os.access(bundled, os.X_OK):
             return str(bundled)
     return shutil.which("ffmpeg")
