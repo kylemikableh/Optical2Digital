@@ -13,8 +13,33 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: Determine version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      # Derives the app version from the triggering tag (v1.2.3 -> 1.2.3) so
+      # the macOS and Windows builds bake in a matching, tag-accurate
+      # version instead of each hardcoding their own. workflow_dispatch runs
+      # have no tag, so they fall back to a clearly-marked dev version.
+      - name: Determine version from tag
+        id: get_version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            VERSION="${REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   build-macos:
     name: Build macOS (.dmg)
+    needs: version
     runs-on: macos-latest
     permissions:
       contents: write # needed to create the release and upload the dmg
@@ -51,7 +76,11 @@ jobs:
       # Does the frontend build, ffmpeg bundling, icon generation,
       # PyInstaller build, and dmg creation in one shot — see the script
       # for details. Produces packaging/dist/Optical2Digital.dmg.
+      # APP_VERSION flows into packaging/optical2digital.spec, which bakes
+      # it into the .app's Info.plist and the running app's window title.
       - name: Build app + dmg
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
         run: ./packaging/build-macos.sh
 
       # Only publish on an actual tag push — workflow_dispatch runs (used
@@ -65,6 +94,7 @@ jobs:
 
   build-windows-x64:
     name: Build Windows (x64)
+    needs: version
     runs-on: windows-latest
     permissions:
       contents: write # needed to create the release and upload artifacts
@@ -103,7 +133,7 @@ jobs:
       # and packaging/dist/Optical2Digital-Setup-x64.exe.
       - name: Build app, zip, and installer
         shell: pwsh
-        run: .\packaging\build-windows.ps1 -Arch x64
+        run: .\packaging\build-windows.ps1 -Arch x64 -Version "${{ needs.version.outputs.version }}"
 
       - name: Publish release
         if: github.ref_type == 'tag'
@@ -116,6 +146,7 @@ jobs:
 
   build-windows-arm64:
     name: Build Windows (arm64)
+    needs: version
     # GitHub-hosted arm64 Windows runner. VERIFY at implementation/rollout
     # time: availability, quota, and enrollment requirements for this runner
     # label may differ from windows-latest and are worth reconfirming before
@@ -155,7 +186,7 @@ jobs:
 
       - name: Build app, zip, and installer
         shell: pwsh
-        run: .\packaging\build-windows.ps1 -Arch arm64
+        run: .\packaging\build-windows.ps1 -Arch arm64 -Version "${{ needs.version.outputs.version }}"
 
       - name: Publish release
         if: github.ref_type == 'tag'

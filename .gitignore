@@ -15,3 +15,4 @@ packaging/build/
 packaging/dist/
 packaging/icon.icns
 packaging/icon.ico
+app_version.py

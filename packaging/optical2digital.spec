@@ -7,6 +7,7 @@
 # cross-compilation happening anywhere in this pipeline, so that's exactly
 # the platform being targeted.
 
+import os
 import pathlib
 import sys
 
@@ -19,6 +20,16 @@ import sys
 ROOT_DIR = pathlib.Path(SPECPATH).resolve().parent
 FFMPEG_BUNDLE_DIR = ROOT_DIR / "packaging" / "build" / "ffmpeg-bundle"
 IS_MACOS = sys.platform == "darwin"
+
+# APP_VERSION is set by packaging/build-macos.sh / build-windows.ps1 (which
+# in turn derive it from the release git tag — see
+# .github/workflows/release.yml), falling back to a clearly-marked dev
+# version for local/manual builds. Written out as a real module here, before
+# Analysis() runs below, so PyInstaller's static import analysis picks it up
+# automatically because packaging/launcher.py imports it — that's what gets
+# the version into the running app's window title, on both platforms.
+APP_VERSION = os.environ.get("APP_VERSION", "0.0.0-dev")
+(ROOT_DIR / "app_version.py").write_text(f'APP_VERSION = "{APP_VERSION}"\n', encoding="utf-8")
 
 FFMPEG_BIN_NAME = "ffmpeg" if IS_MACOS else "ffmpeg.exe"
 ICON_PATH = str(ROOT_DIR / "packaging" / ("icon.icns" if IS_MACOS else "icon.ico"))
@@ -95,4 +106,5 @@ if IS_MACOS:
         name='Optical2Digital.app',
         icon=ICON_PATH,
         bundle_identifier='com.mikolasolutions.optical2digital',
+        version=APP_VERSION,
     )

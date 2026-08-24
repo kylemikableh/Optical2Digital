@@ -26,6 +26,15 @@ from webview import FileDialog
 
 import server as server_module
 
+try:
+    # Generated at build time by packaging/optical2digital.spec from the
+    # APP_VERSION env var (itself derived from the release git tag — see
+    # .github/workflows/release.yml). Not present for dev runs
+    # (`python packaging/launcher.py` outside of PyInstaller).
+    from app_version import APP_VERSION
+except ImportError:
+    APP_VERSION = "0.0.0-dev"
+
 HOST = "127.0.0.1"
 PORT = 8000
 
@@ -117,7 +126,9 @@ def main():
     if not wait_for_server(url):
         raise RuntimeError(f"Server did not start within timeout at {url}")
 
-    webview.create_window("Optical2Digital", url, width=1280, height=860, js_api=Api())
+    webview.create_window(
+        f"Optical2Digital v{APP_VERSION}", url, width=1280, height=860, js_api=Api()
+    )
     webview.start()
 
     # Window closed — shut the server down cleanly so no process is left

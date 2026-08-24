@@ -7,11 +7,18 @@
 #ifndef AppArch
   #define AppArch "x64"
 #endif
+; AppVersion preprocessor define, passed as /DAppVersion=<version> from
+; build-windows.ps1 (which in turn derives it from the release git tag via
+; .github/workflows/release.yml). Falls back to a clearly-marked dev
+; version for manual/local builds that don't pass one.
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 
 [Setup]
 AppId={{49061815-55F2-4CA5-8AD8-2C6561805D5C}
 AppName=Optical2Digital
-AppVersion=1.0
+AppVersion={#AppVersion}
 AppPublisher=Kyle Mikolajczyk
 DefaultDirName={autopf}\Optical2Digital
 DefaultGroupName=Optical2Digital
