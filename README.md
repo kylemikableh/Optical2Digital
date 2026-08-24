@@ -11,7 +11,7 @@ Also, another important goal is that anyone can understand how the audio convers
 Currenty archetecture is a React front-end and a python backend, but they can be run in many ways. The python/backend can be used via REST and can be programatically called. Developers or software-minded users can launch the application locally and run it in a browser.
 
 ### Stand-Alone App
-There is work being done to have the python/react packaged as a OS-native application for devices that run the server and front end, and contain ffmpeg, all in one click. The hope is this version is useful for archivisits and others who want the application to "just work". Currently only Mac-OS is generated but soon Windows and Linux should be supported and distributed under Releases. See [Download the app](#download-the-app)
+There is work being done to have the python/react packaged as a OS-native application for devices that run the server and front end, and contain ffmpeg, all in one click. The hope is this version is useful for archivisits and others who want the application to "just work". Mac-OS and Windows (x64 and arm64) are currently generated, and Linux should be supported soon, all distributed under Releases. See [Download the app](#download-the-app)
 
 ### Kyle's Optical Decoder
 Python CLI tool that can extract film optical audio
@@ -21,7 +21,9 @@ Python CLI tool that can extract film optical audio
 - Node.js 18+
 - ffmpeg (must be on your `PATH`) — required for the Export Video feature (muxing/rendering); install via `brew install ffmpeg` (macOS), your Linux package manager, or from [ffmpeg.org](https://ffmpeg.org/) (Windows). Not required for WAV-only extraction.
 
-## Download the app (Mac OS Only)
+## Download the app
+
+### macOS
 
 Grab the latest `Optical2Digital.dmg` from the [Releases page](../../releases), open it, and drag `Optical2Digital.app` to Applications.
 
@@ -29,10 +31,18 @@ Grab the latest `Optical2Digital.dmg` from the [Releases page](../../releases), 
 
 No Python, Node, or ffmpeg install needed — everything required is bundled inside the app.
 
+### Windows
+
+Grab the latest `Optical2Digital-Setup-x64.exe` (or `-arm64.exe` on ARM-based Windows devices, e.g. Surface Pro X / Snapdragon laptops) from the [Releases page](../../releases) and run it — it installs to Program Files, adds a Start Menu shortcut, and registers an uninstaller. Prefer not to install anything? Grab `Optical2Digital-win-x64.zip` (or `-win-arm64.zip`) instead, extract it anywhere, and run `Optical2Digital.exe` directly from the extracted folder.
+
+**First launch only:** because this build isn't code-signed, Windows SmartScreen will show an "unrecognized publisher" warning. Click **More info**, then **Run anyway** to proceed. After that first launch, it opens normally.
+
+No Python, Node, or ffmpeg install needed — everything required is bundled inside the app.
+
 ### Developer Setup (normal local)
 
-First time: `start-dev-fresh.sh`
-Afterwards: `start-dev.sh`
+First time: `start-dev-fresh.sh` (macOS/Linux) or `start-dev-fresh.bat` (Windows)
+Afterwards: `start-dev.sh` (macOS/Linux) or `start-dev.bat` (Windows)
 
 ### Setup (development)
 
@@ -42,8 +52,17 @@ python -m venv .venv
 source .venv/bin/activate   # macOS/Linux
 # .venv\Scripts\activate    # Windows
 
-pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller
+pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller
+CMAKE_ARGS="-DBUILD_opencv_dnn=OFF" pip install --no-build-isolation opencv-python  # set $env:CMAKE_ARGS instead on Windows PowerShell
 ```
+(opencv-python is installed last, with build isolation off, so it builds
+against the numpy already installed above rather than fetching its own old
+pinned numpy — which has no prebuilt wheel on some platforms, e.g. Windows
+ARM64, and fails to compile from source there. CMAKE_ARGS drops the unused
+dnn module, which otherwise fails to *link* on Windows ARM64 — this app
+never calls cv2.dnn.*. Both are no-ops wherever a prebuilt opencv-python
+wheel installs instead of building from source. See the release workflow's
+"Create Python virtualenv" step for the full explanation.)
 
 **Frontend (React):**
 ```bash

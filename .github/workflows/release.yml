@@ -13,8 +13,33 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: Determine version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      # Derives the app version from the triggering tag (v1.2.3 -> 1.2.3) so
+      # the macOS and Windows builds bake in a matching, tag-accurate
+      # version instead of each hardcoding their own. workflow_dispatch runs
+      # have no tag, so they fall back to a clearly-marked dev version.
+      - name: Determine version from tag
+        id: get_version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            VERSION="${REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   build-macos:
     name: Build macOS (.dmg)
+    needs: version
     runs-on: macos-latest
     permissions:
       contents: write # needed to create the release and upload the dmg
@@ -35,12 +60,40 @@ jobs:
       # packaging/build-macos.sh (`source .venv/bin/activate`) expects the
       # venv to already exist — recreate it exactly as README.md's
       # "Setup (development)" section documents.
+      #
+      # opencv-python ships no prebuilt wheel for some platforms (notably
+      # Windows ARM64 — see the windows-arm64 job), so its own build always
+      # has to compile from source there. Its PEP 517 backend then pins a
+      # very old numpy version as ITS OWN build-time dependency, and that
+      # old numpy has no wheel for such platforms either, forcing a source
+      # build of numpy 1.22.2 too — which fails to compile on the toolchain
+      # available on those runners ("Did not find correct pointer sized
+      # integer" in arraytypes.c.src). Installing numpy (and opencv-python's
+      # other build deps) as normal wheels *first*, then installing
+      # opencv-python with --no-build-isolation, makes it build against the
+      # already-installed modern numpy instead of pinning/fetching its own —
+      # avoiding that old-numpy source build entirely. Applied uniformly
+      # here (not just on the affected platform) so all three jobs install
+      # opencv-python the same way; it's a no-op wherever a prebuilt wheel
+      # exists.
+      #
+      # CMAKE_ARGS=-DBUILD_opencv_dnn=OFF: once the numpy issue above is
+      # fixed, a from-source opencv-python build on Windows ARM64 still
+      # fails at link time — libopencv_dnn's bundled ONNX Runtime/MLAS
+      # kernels reference ARM64 assembly symbols (e.g. MlasGemvFloatKernel)
+      # that don't get built on this toolchain, so linking cv2.pyd fails
+      # with unresolved externals. This app never calls cv2.dnn.* (verified
+      # via a repo-wide grep), so the module is dropped instead of chasing
+      # that assembly/link gap. Harmless everywhere else — CMAKE_ARGS is
+      # simply unused when a prebuilt wheel is installed instead of built.
       - name: Create Python virtualenv
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
-          pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller
+          pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller
+          export CMAKE_ARGS="-DBUILD_opencv_dnn=OFF"
+          pip install --no-build-isolation opencv-python
 
       # The two external tools packaging/bundle_ffmpeg_macos.sh requires
       # (it errors out by name if either is missing). Both are available
@@ -51,7 +104,11 @@ jobs:
       # Does the frontend build, ffmpeg bundling, icon generation,
       # PyInstaller build, and dmg creation in one shot — see the script
       # for details. Produces packaging/dist/Optical2Digital.dmg.
+      # APP_VERSION flows into packaging/optical2digital.spec, which bakes
+      # it into the .app's Info.plist and the running app's window title.
       - name: Build app + dmg
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
         run: ./packaging/build-macos.sh
 
       # Only publish on an actual tag push — workflow_dispatch runs (used
@@ -63,38 +120,131 @@ jobs:
           files: packaging/dist/Optical2Digital.dmg
           generate_release_notes: true
 
-  # --- Placeholders -----------------------------------------------------
-  # Not implemented yet. Each is a real job (so it shows up in the Actions
-  # UI and the job matrix is already in place) that just no-ops — filling
-  # in a platform later means adding steps here, following the
-  # build-macos job above as the pattern, not redesigning the workflow.
-  # None of these gate or depend on build-macos, so a placeholder never
-  # blocks or fails the macOS release.
-
   build-windows-x64:
-    name: Build Windows (x64) [placeholder]
+    name: Build Windows (x64)
+    needs: version
     runs-on: windows-latest
+    permissions:
+      contents: write # needed to create the release and upload artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: TODO
-        shell: bash
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Mirrors the build-macos job's venv step (see its comment for why
+      # opencv-python is installed last with --no-build-isolation, and for
+      # CMAKE_ARGS=-DBUILD_opencv_dnn=OFF), plus pillow (build-time-only,
+      # used by packaging/make_icon_windows.py to generate icon.ico).
+      - name: Create Python virtualenv
+        shell: pwsh
         run: |
-          echo "TODO: implement Windows x64 build (see build-macos job for the pattern)"
+          python -m venv .venv
+          .venv\Scripts\Activate.ps1
+          pip install --upgrade pip
+          pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pillow
+          $env:CMAKE_ARGS = "-DBUILD_opencv_dnn=OFF"
+          pip install --no-build-isolation opencv-python
+
+      # windows-latest ships Chocolatey preinstalled; iscc (the Inno Setup
+      # compiler) is what packaging/build-windows.ps1 shells out to.
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      # Does the frontend build, ffmpeg bundling, icon generation,
+      # PyInstaller build, zip, and installer creation in one shot — see
+      # the script for details. Produces packaging/dist/Optical2Digital-win-x64.zip
+      # and packaging/dist/Optical2Digital-Setup-x64.exe.
+      - name: Build app, zip, and installer
+        shell: pwsh
+        run: .\packaging\build-windows.ps1 -Arch x64 -Version "${{ needs.version.outputs.version }}"
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packaging/dist/Optical2Digital-win-x64.zip
+            packaging/dist/Optical2Digital-Setup-x64.exe
+          generate_release_notes: true
 
   build-windows-arm64:
-    name: Build Windows (arm64) [placeholder]
-    # Placeholder runs on the standard runner for now so it reliably
-    # succeeds; swap to an ARM64-capable runner (e.g. windows-11-arm)
-    # once this job is actually implemented.
-    runs-on: windows-latest
+    name: Build Windows (arm64)
+    needs: version
+    # GitHub-hosted arm64 Windows runner. VERIFY at implementation/rollout
+    # time: availability, quota, and enrollment requirements for this runner
+    # label may differ from windows-latest and are worth reconfirming before
+    # relying on this for a real release.
+    runs-on: windows-11-arm
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: TODO
-        shell: bash
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Mirrors the build-macos job's venv step — this is the platform
+      # where all of its workarounds actually matter: opencv-python has no
+      # win_arm64 wheel at all, so without
+      # --no-build-isolation its build pulls in its own old pinned numpy
+      # (also no win_arm64 wheel, fails to compile from source here); its
+      # bundled dnn/ONNX-Runtime module fails to *link* on this toolchain
+      # (unresolved ARM64 MLAS assembly symbols), hence
+      # CMAKE_ARGS=-DBUILD_opencv_dnn=OFF (see the build-macos job's comment
+      # for both). And unique to this platform: OpenCV's own ffmpeg
+      # 3rdparty download has no ARM64 entry at all (only x86/x64), so its
+      # ffmpeg videoio plugin DLL can never be built here — but
+      # opencv-python's packaging step unconditionally requires that DLL to
+      # exist for any 64-bit Windows build, so it hard-fails at package time
+      # even though the real compile succeeded. win_arm64_opencv_ffmpeg_
+      # stub.cmake installs a harmless placeholder satisfying that check;
+      # cv2.VideoCapture falls back to the built-in Windows Media
+      # Foundation backend at runtime instead (see the .cmake file's
+      # comment for the full explanation). Plus pillow (build-time-only,
+      # used by packaging/make_icon_windows.py to generate icon.ico).
+      - name: Create Python virtualenv
+        shell: pwsh
         run: |
-          echo "TODO: implement Windows arm64 build (see build-macos job for the pattern)"
+          python -m venv .venv
+          .venv\Scripts\Activate.ps1
+          pip install --upgrade pip
+          pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pillow
+          $ffmpegStub = (Resolve-Path "packaging\win_arm64_opencv_ffmpeg_stub.cmake").Path -replace '\\', '/'
+          $env:CMAKE_ARGS = "-DBUILD_opencv_dnn=OFF -DCMAKE_PROJECT_INCLUDE=$ffmpegStub"
+          pip install --no-build-isolation opencv-python
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build app, zip, and installer
+        shell: pwsh
+        run: .\packaging\build-windows.ps1 -Arch arm64 -Version "${{ needs.version.outputs.version }}"
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packaging/dist/Optical2Digital-win-arm64.zip
+            packaging/dist/Optical2Digital-Setup-arm64.exe
+          generate_release_notes: true
 
   build-linux:
     name: Build Linux [placeholder]
