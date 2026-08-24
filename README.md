@@ -53,12 +53,15 @@ source .venv/bin/activate   # macOS/Linux
 # .venv\Scripts\activate    # Windows
 
 pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller
-pip install --no-build-isolation opencv-python
+CMAKE_ARGS="-DBUILD_opencv_dnn=OFF" pip install --no-build-isolation opencv-python  # set $env:CMAKE_ARGS instead on Windows PowerShell
 ```
 (opencv-python is installed last, with build isolation off, so it builds
 against the numpy already installed above rather than fetching its own old
 pinned numpy — which has no prebuilt wheel on some platforms, e.g. Windows
-ARM64, and fails to compile from source there. See the release workflow's
+ARM64, and fails to compile from source there. CMAKE_ARGS drops the unused
+dnn module, which otherwise fails to *link* on Windows ARM64 — this app
+never calls cv2.dnn.*. Both are no-ops wherever a prebuilt opencv-python
+wheel installs instead of building from source. See the release workflow's
 "Create Python virtualenv" step for the full explanation.)
 
 **Frontend (React):**

@@ -76,12 +76,23 @@ jobs:
       # here (not just on the affected platform) so all three jobs install
       # opencv-python the same way; it's a no-op wherever a prebuilt wheel
       # exists.
+      #
+      # CMAKE_ARGS=-DBUILD_opencv_dnn=OFF: once the numpy issue above is
+      # fixed, a from-source opencv-python build on Windows ARM64 still
+      # fails at link time — libopencv_dnn's bundled ONNX Runtime/MLAS
+      # kernels reference ARM64 assembly symbols (e.g. MlasGemvFloatKernel)
+      # that don't get built on this toolchain, so linking cv2.pyd fails
+      # with unresolved externals. This app never calls cv2.dnn.* (verified
+      # via a repo-wide grep), so the module is dropped instead of chasing
+      # that assembly/link gap. Harmless everywhere else — CMAKE_ARGS is
+      # simply unused when a prebuilt wheel is installed instead of built.
       - name: Create Python virtualenv
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
           pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller
+          export CMAKE_ARGS="-DBUILD_opencv_dnn=OFF"
           pip install --no-build-isolation opencv-python
 
       # The two external tools packaging/bundle_ffmpeg_macos.sh requires
@@ -130,9 +141,9 @@ jobs:
           node-version: "20"
 
       # Mirrors the build-macos job's venv step (see its comment for why
-      # opencv-python is installed last with --no-build-isolation), plus
-      # pillow (build-time-only, used by packaging/make_icon_windows.py to
-      # generate icon.ico).
+      # opencv-python is installed last with --no-build-isolation, and for
+      # CMAKE_ARGS=-DBUILD_opencv_dnn=OFF), plus pillow (build-time-only,
+      # used by packaging/make_icon_windows.py to generate icon.ico).
       - name: Create Python virtualenv
         shell: pwsh
         run: |
@@ -140,6 +151,7 @@ jobs:
           .venv\Scripts\Activate.ps1
           pip install --upgrade pip
           pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pillow
+          $env:CMAKE_ARGS = "-DBUILD_opencv_dnn=OFF"
           pip install --no-build-isolation opencv-python
 
       # windows-latest ships Chocolatey preinstalled; iscc (the Inno Setup
@@ -188,14 +200,16 @@ jobs:
         with:
           node-version: "20"
 
-      # Mirrors the build-macos job's venv step (see its comment for why
-      # opencv-python is installed last with --no-build-isolation — this is
-      # the platform where that actually matters: opencv-python has no
-      # win_arm64 wheel at all, so without this its build pulls in its own
-      # old pinned numpy, which also has no win_arm64 wheel and fails to
-      # compile from source on this runner's toolchain), plus pillow
-      # (build-time-only, used by packaging/make_icon_windows.py to
-      # generate icon.ico).
+      # Mirrors the build-macos job's venv step — this is the platform
+      # where both of its workarounds actually matter: opencv-python has no
+      # win_arm64 wheel at all, so without --no-build-isolation its build
+      # pulls in its own old pinned numpy (also no win_arm64 wheel, fails
+      # to compile from source here), and even once that's fixed, its
+      # bundled dnn/ONNX-Runtime module fails to *link* on this toolchain
+      # (unresolved ARM64 MLAS assembly symbols) — hence
+      # CMAKE_ARGS=-DBUILD_opencv_dnn=OFF, see the build-macos job's comment
+      # for the full explanation of both. Plus pillow (build-time-only,
+      # used by packaging/make_icon_windows.py to generate icon.ico).
       - name: Create Python virtualenv
         shell: pwsh
         run: |
@@ -203,6 +217,7 @@ jobs:
           .venv\Scripts\Activate.ps1
           pip install --upgrade pip
           pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pillow
+          $env:CMAKE_ARGS = "-DBUILD_opencv_dnn=OFF"
           pip install --no-build-isolation opencv-python
 
       - name: Install Inno Setup
