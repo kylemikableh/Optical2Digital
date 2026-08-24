@@ -60,12 +60,29 @@ jobs:
       # packaging/build-macos.sh (`source .venv/bin/activate`) expects the
       # venv to already exist — recreate it exactly as README.md's
       # "Setup (development)" section documents.
+      #
+      # opencv-python ships no prebuilt wheel for some platforms (notably
+      # Windows ARM64 — see the windows-arm64 job), so its own build always
+      # has to compile from source there. Its PEP 517 backend then pins a
+      # very old numpy version as ITS OWN build-time dependency, and that
+      # old numpy has no wheel for such platforms either, forcing a source
+      # build of numpy 1.22.2 too — which fails to compile on the toolchain
+      # available on those runners ("Did not find correct pointer sized
+      # integer" in arraytypes.c.src). Installing numpy (and opencv-python's
+      # other build deps) as normal wheels *first*, then installing
+      # opencv-python with --no-build-isolation, makes it build against the
+      # already-installed modern numpy instead of pinning/fetching its own —
+      # avoiding that old-numpy source build entirely. Applied uniformly
+      # here (not just on the affected platform) so all three jobs install
+      # opencv-python the same way; it's a no-op wherever a prebuilt wheel
+      # exists.
       - name: Create Python virtualenv
         run: |
           python3 -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
-          pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller
+          pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller
+          pip install --no-build-isolation opencv-python
 
       # The two external tools packaging/bundle_ffmpeg_macos.sh requires
       # (it errors out by name if either is missing). Both are available
@@ -112,15 +129,18 @@ jobs:
         with:
           node-version: "20"
 
-      # Mirrors the build-macos job's venv step, plus pillow (build-time-only,
-      # used by packaging/make_icon_windows.py to generate icon.ico).
+      # Mirrors the build-macos job's venv step (see its comment for why
+      # opencv-python is installed last with --no-build-isolation), plus
+      # pillow (build-time-only, used by packaging/make_icon_windows.py to
+      # generate icon.ico).
       - name: Create Python virtualenv
         shell: pwsh
         run: |
           python -m venv .venv
           .venv\Scripts\Activate.ps1
           pip install --upgrade pip
-          pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller pillow
+          pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pillow
+          pip install --no-build-isolation opencv-python
 
       # windows-latest ships Chocolatey preinstalled; iscc (the Inno Setup
       # compiler) is what packaging/build-windows.ps1 shells out to.
@@ -168,18 +188,22 @@ jobs:
         with:
           node-version: "20"
 
-      # NOTE: arm64 Windows wheel availability for opencv-python/scipy/numpy
-      # has historically lagged behind x64 — if this step fails resolving
-      # wheels (forcing a from-source build with no toolchain present),
-      # that's a real gap to address (e.g. opencv-python-headless, or
-      # descoping arm64) rather than something to silently work around here.
+      # Mirrors the build-macos job's venv step (see its comment for why
+      # opencv-python is installed last with --no-build-isolation — this is
+      # the platform where that actually matters: opencv-python has no
+      # win_arm64 wheel at all, so without this its build pulls in its own
+      # old pinned numpy, which also has no win_arm64 wheel and fails to
+      # compile from source on this runner's toolchain), plus pillow
+      # (build-time-only, used by packaging/make_icon_windows.py to
+      # generate icon.ico).
       - name: Create Python virtualenv
         shell: pwsh
         run: |
           python -m venv .venv
           .venv\Scripts\Activate.ps1
           pip install --upgrade pip
-          pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller pillow
+          pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pillow
+          pip install --no-build-isolation opencv-python
 
       - name: Install Inno Setup
         run: choco install innosetup -y

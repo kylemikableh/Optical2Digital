@@ -52,8 +52,14 @@ python -m venv .venv
 source .venv/bin/activate   # macOS/Linux
 # .venv\Scripts\activate    # Windows
 
-pip install opencv-python numpy natsort scipy fastapi uvicorn pydantic pywebview pyinstaller
+pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller
+pip install --no-build-isolation opencv-python
 ```
+(opencv-python is installed last, with build isolation off, so it builds
+against the numpy already installed above rather than fetching its own old
+pinned numpy — which has no prebuilt wheel on some platforms, e.g. Windows
+ARM64, and fails to compile from source there. See the release workflow's
+"Create Python virtualenv" step for the full explanation.)
 
 **Frontend (React):**
 ```bash
