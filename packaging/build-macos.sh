@@ -13,8 +13,8 @@ echo "== Bundling ffmpeg =="
 echo "== Generating icon =="
 mkdir -p packaging/icon.iconset
 for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" cover.png --out "packaging/icon.iconset/icon_${size}x${size}.png" >/dev/null
-  sips -z $((size*2)) $((size*2)) cover.png --out "packaging/icon.iconset/icon_${size}x${size}@2x.png" >/dev/null
+  sips -z "$size" "$size" packaging/O2DLogo.png --out "packaging/icon.iconset/icon_${size}x${size}.png" >/dev/null
+  sips -z $((size*2)) $((size*2)) packaging/O2DLogo.png --out "packaging/icon.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns packaging/icon.iconset -o packaging/icon.icns
 rm -rf packaging/icon.iconset

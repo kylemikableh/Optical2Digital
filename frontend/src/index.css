@@ -397,6 +397,14 @@ select {
   color: var(--text-muted);
 }
 
+.status-bar a {
+  color: inherit;
+  text-decoration: none;
+}
+.status-bar a:hover {
+  text-decoration: underline;
+}
+
 .tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border); }
 .tab-bar button {
   border-radius: 0;

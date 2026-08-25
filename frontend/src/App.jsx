@@ -1418,7 +1418,7 @@ function App() {
       {/* Status bar */}
       <div className="status-bar">
         <span>{status}</span>
-        <span>By Kyle Mikolajczyk</span>
+        <a href="https://optical2digital.org" target="_blank" rel="noopener noreferrer">optical2digital.org</a>
       </div>
     </div>
   )

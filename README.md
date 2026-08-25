@@ -1,4 +1,9 @@
 # Optical2Digital
+
+<p align="center">
+  <img src="packaging/O2DLogo-rounded.png" alt="Optical2Digital logo" width="200">
+</p>
+
 ## Optical Audio to Digital PCM
 Optical audio on film has been a critical part of the presentation of motion pictures since the 1920s when variable-area/variable-density was first introduced.
 Converting scans of film can be difficult, and extracting audio moreso. There has been a very good tool for the past decade, [AEO-Light](https://github.com/usc-imi/aeo-light), that is popular 

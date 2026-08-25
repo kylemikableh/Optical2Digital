@@ -13,7 +13,7 @@ import pathlib
 from PIL import Image
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parent.parent
-SRC = ROOT_DIR / "cover.png"
+SRC = ROOT_DIR / "packaging" / "O2DLogo.png"
 DEST = ROOT_DIR / "packaging" / "icon.ico"
 
 img = Image.open(SRC).convert("RGBA")
