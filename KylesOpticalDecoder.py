@@ -41,6 +41,8 @@ import natsort
 from scipy.io import wavfile
 from scipy.signal import butter, sosfilt, resample
 
+import dpx_reader
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -491,6 +493,21 @@ def select_soundtrack_channel(img, soundtrack_color="B&W"):
 # Frame source abstraction
 # ---------------------------------------------------------------------------
 
+def _read_image_file(path):
+    """Read a single image file as uint8 (grayscale or BGR), or None on failure.
+
+    Dispatches .dpx files to dpx_reader (OpenCV has no DPX codec); everything
+    else goes through cv2.imread as before.
+    """
+    if os.path.splitext(path)[1].lower() == ".dpx":
+        try:
+            return dpx_reader.read_dpx(path)
+        except dpx_reader.DPXError as e:
+            print(f"Warning: {e}", file=sys.stderr)
+            return None
+    return cv2.imread(path, cv2.IMREAD_UNCHANGED)
+
+
 class ImageSequenceSource:
     """Frame source backed by a directory of image files."""
 
@@ -499,7 +516,7 @@ class ImageSequenceSource:
         self._filenames = list_frames(input_dir)
         if not self._filenames:
             raise ValueError(f"No image files found in '{input_dir}'")
-        first = cv2.imread(os.path.join(input_dir, self._filenames[0]), cv2.IMREAD_UNCHANGED)
+        first = _read_image_file(os.path.join(input_dir, self._filenames[0]))
         if first is None:
             raise RuntimeError(f"Could not read first frame: {self._filenames[0]}")
         self._frame_height, self._frame_width = first.shape[:2]
@@ -539,10 +556,7 @@ class ImageSequenceSource:
         """Load frame by index as uint8 image (grayscale or color) or None."""
         if index < 0 or index >= len(self._filenames):
             return None
-        return cv2.imread(
-            os.path.join(self._input_dir, self._filenames[index]),
-            cv2.IMREAD_UNCHANGED,
-        )
+        return _read_image_file(os.path.join(self._input_dir, self._filenames[index]))
 
 
 class VideoSource:
@@ -620,7 +634,7 @@ def list_frames(input_dir):
 
 def load_frame(input_dir, filename):
     """Load a single frame as a uint8 numpy array (grayscale or color)."""
-    return cv2.imread(os.path.join(input_dir, filename), cv2.IMREAD_UNCHANGED)
+    return _read_image_file(os.path.join(input_dir, filename))
 
 
 def rotate_image(img, degrees):
