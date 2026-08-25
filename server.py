@@ -76,6 +76,8 @@ _extract_job = {
     "phase": "",
     "done": False,
     "error": None,
+    "cancelled": False,
+    "cancel_event": None,
     "wav_bytes": None,
 }
 
@@ -87,6 +89,8 @@ _export_video_job = {
     "phase": "",
     "done": False,
     "error": None,
+    "cancelled": False,
+    "cancel_event": None,
     "video_bytes": None,
 }
 
@@ -287,6 +291,7 @@ class ExtractRequest(BaseModel):
     stereo: bool = False
     start_frame: int = 0
     end_frame: int | None = None
+    bit_depth: Literal["int16", "int24", "int32", "float32"] = "int16"
 
 
 @app.post("/api/extract")
@@ -312,6 +317,8 @@ def extract(req: ExtractRequest):
     _extract_job["phase"] = "Processing frames"
     _extract_job["done"] = False
     _extract_job["error"] = None
+    _extract_job["cancelled"] = False
+    _extract_job["cancel_event"] = threading.Event()
     _extract_job["wav_bytes"] = None
 
     def _run():
@@ -349,11 +356,16 @@ def extract(req: ExtractRequest):
                 reverse=req.reverse,
                 start_frame=req.start_frame,
                 end_frame=req.end_frame,
+                bit_depth=req.bit_depth,
+                cancel_event=_extract_job["cancel_event"],
                 progress_callback=progress_cb,
                 phase_callback=phase_cb,
             )
             _extract_job["wav_bytes"] = wav_bytes
             _extract_job["phase"] = "Complete"
+        except decoder.ExtractionCancelled:
+            _extract_job["cancelled"] = True
+            _extract_job["phase"] = "Cancelled"
         except Exception as e:
             _extract_job["error"] = str(e)
             _extract_job["phase"] = "Error"
@@ -363,6 +375,19 @@ def extract(req: ExtractRequest):
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started", "total": frame_count}
+
+
+@app.post("/api/extract/cancel")
+def extract_cancel():
+    """Signal the in-progress extraction to stop. Cancellation is
+    cooperative (checked once per frame, and once more at the stitch/
+    resample/filter boundary) rather than instantaneous — the job finishes
+    shortly after, marked cancelled rather than errored."""
+    if not _extract_job["running"]:
+        raise HTTPException(409, "No extraction in progress")
+    if _extract_job["cancel_event"] is not None:
+        _extract_job["cancel_event"].set()
+    return {"status": "cancelling"}
 
 
 @app.get("/api/extract/progress")
@@ -376,6 +401,7 @@ def extract_progress():
                 "phase": _extract_job["phase"],
                 "done": _extract_job["done"],
                 "error": _extract_job["error"],
+                "cancelled": _extract_job["cancelled"],
             }
             yield f"data: {json.dumps(data)}\n\n"
             if _extract_job["done"]:
@@ -433,9 +459,12 @@ def export_video(req: ExtractRequest):
     _export_video_job["phase"] = "Starting"
     _export_video_job["done"] = False
     _export_video_job["error"] = None
+    _export_video_job["cancelled"] = False
+    _export_video_job["cancel_event"] = threading.Event()
     _export_video_job["video_bytes"] = None
 
     def _run():
+        cancel_event = _export_video_job["cancel_event"]
         try:
             with tempfile.TemporaryDirectory(prefix="o2d_export_") as tmpdir:
                 def phase_cb(msg):
@@ -472,6 +501,8 @@ def export_video(req: ExtractRequest):
                     reverse=req.reverse,
                     start_frame=req.start_frame,
                     end_frame=req.end_frame,
+                    bit_depth=req.bit_depth,
+                    cancel_event=cancel_event,
                     progress_callback=progress_cb,
                 )
                 wav_path = os.path.join(tmpdir, "audio.wav")
@@ -488,15 +519,18 @@ def export_video(req: ExtractRequest):
 
                 if is_video:
                     phase_cb("Muxing video")
-                    _mux_video_source(source.path, wav_path, out_path, req.fps or source.fps, start, end)
+                    _mux_video_source(source.path, wav_path, out_path, req.fps or source.fps, start, end, cancel_event)
                 else:
                     phase_cb("Rendering video")
-                    _render_image_sequence(source, wav_path, out_path, req.fps, req.rotate, start, end, tmpdir)
+                    _render_image_sequence(source, wav_path, out_path, req.fps, req.rotate, start, end, tmpdir, cancel_event)
 
                 phase_cb("Finalizing")
                 with open(out_path, "rb") as f:
                     _export_video_job["video_bytes"] = f.read()
                 _export_video_job["phase"] = "Complete"
+        except decoder.ExtractionCancelled:
+            _export_video_job["cancelled"] = True
+            _export_video_job["phase"] = "Cancelled"
         except subprocess.CalledProcessError as e:
             stderr_tail = (e.stderr or b"").decode(errors="replace")[-800:]
             _export_video_job["error"] = f"ffmpeg failed: {stderr_tail or e}"
@@ -512,6 +546,19 @@ def export_video(req: ExtractRequest):
     return {"status": "started"}
 
 
+@app.post("/api/export/video/cancel")
+def export_video_cancel():
+    """Signal the in-progress video export to stop — during frame
+    extraction this is checked cooperatively (see /api/extract/cancel);
+    during the ffmpeg mux/render step it terminates the ffmpeg process
+    (see _run_subprocess_cancellable)."""
+    if not _export_video_job["running"]:
+        raise HTTPException(409, "No video export in progress")
+    if _export_video_job["cancel_event"] is not None:
+        _export_video_job["cancel_event"].set()
+    return {"status": "cancelling"}
+
+
 @app.get("/api/export/video/progress")
 def export_video_progress():
     """SSE stream of video export phase/status."""
@@ -523,6 +570,7 @@ def export_video_progress():
                 "phase": _export_video_job["phase"],
                 "done": _export_video_job["done"],
                 "error": _export_video_job["error"],
+                "cancelled": _export_video_job["cancelled"],
             }
             yield f"data: {json.dumps(data)}\n\n"
             if _export_video_job["done"]:
@@ -621,7 +669,33 @@ _ROTATE_FILTERS = {
 _EVEN_DIMS_FILTER = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
 
-def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_frame):
+def _run_subprocess_cancellable(cmd, cancel_event):
+    """subprocess.run(cmd, check=True, capture_output=True) that can be
+    interrupted mid-flight: polls the process with a short timeout instead
+    of blocking uninterruptibly on a single call, so *cancel_event* being
+    set is noticed within ~0.3s and the process is terminated (falling
+    back to kill() if it doesn't exit promptly) rather than run to
+    completion regardless of a cancel request."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=0.3)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise decoder.ExtractionCancelled()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_frame, cancel_event=None):
     """Mux extracted WAV audio onto a trimmed copy of the original video (stream-copy video).
 
     The video input is trimmed to [start_frame, end_frame] here. The WAV is
@@ -654,10 +728,10 @@ def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_fram
         "-movflags", "+faststart",
         out_path,
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    _run_subprocess_cancellable(cmd, cancel_event)
 
 
-def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame, end_frame, tmpdir):
+def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame, end_frame, tmpdir, cancel_event=None):
     """Build a concat-demuxer list from the full original scan frames and render to MP4.
 
     The picture track spans exactly [start_frame, end_frame]. The WAV is
@@ -705,7 +779,7 @@ def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame,
         "-movflags", "+faststart",
         out_path,
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    _run_subprocess_cancellable(cmd, cancel_event)
 
 
 

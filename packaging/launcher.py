@@ -90,6 +90,34 @@ class Api:
             f.write(content)
         return path
 
+    def open_o2d_file(self):
+        """Open panel filtered to *.o2d/*.json + direct read, for the
+        "Load Project"/"Load Settings" pickers.
+
+        This goes through file_types (native Cocoa filtering) rather than
+        the frontend using a plain `<input type="file" accept=".o2d">` —
+        WKWebView maps `accept` to an NSOpenPanel filter via each
+        extension's registered Uniform Type Identifier, and ".o2d" is a
+        custom extension with no such registration, so WKWebView silently
+        drops it from the filter and the file never appears in the panel
+        (".json" has a system UTI, so it filters fine — this bug is
+        specific to unregistered extensions). Same reasoning as
+        choose_video_file()'s file_types filtering. No path-based
+        filesystem access exists on the JS side, so — like
+        save_text_file() — this reads the file itself and returns its
+        content directly, no backend round trip needed.
+        """
+        result = webview.windows[0].create_file_dialog(
+            FileDialog.OPEN,
+            file_types=("Optical2Digital Files (*.o2d;*.json)",),
+        )
+        if not result:
+            return None
+        path = result[0]
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return {"path": path, "content": content}
+
 
 def start_server_thread(app, host=HOST, port=PORT):
     """Start uvicorn serving *app* in a background thread.

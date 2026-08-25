@@ -84,6 +84,37 @@ function soundtrackChannelLabel(soundtrackColor) {
   return 'GREEN channel (non-monochrome frames)'
 }
 
+// Non-drop-frame HH:MM:SS:FF timecode, using the nominal (rounded) fps as
+// the frames-per-second component — this tool doesn't need broadcast-grade
+// drop-frame accounting, just a human-readable alternative to a raw frame
+// number.
+function timecodeFps(fps) {
+  return Math.max(1, Math.round(fps) || 24)
+}
+
+function framesToTimecode(frame, fps) {
+  const fpsInt = timecodeFps(fps)
+  const total = Math.max(0, Math.trunc(frame) || 0)
+  const ff = total % fpsInt
+  const totalSecs = Math.floor(total / fpsInt)
+  const ss = totalSecs % 60
+  const mm = Math.floor(totalSecs / 60) % 60
+  const hh = Math.floor(totalSecs / 3600)
+  const pad = n => String(n).padStart(2, '0')
+  return `${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`
+}
+
+// Returns the frame number for "HH:MM:SS:FF" (or ...;FF), or null if the
+// text isn't a valid timecode for the given fps.
+function timecodeToFrames(text, fps) {
+  const m = String(text).trim().match(/^(\d{1,3}):(\d{1,2}):(\d{1,2})[:;](\d{1,3})$/)
+  if (!m) return null
+  const [hh, mm, ss, ff] = m.slice(1).map(Number)
+  const fpsInt = timecodeFps(fps)
+  if (mm >= 60 || ss >= 60 || ff >= fpsInt) return null
+  return (hh * 3600 + mm * 60 + ss) * fpsInt + ff
+}
+
 function App() {
   // Project state
   const [loaded, setLoaded] = useState(false)
@@ -115,6 +146,7 @@ function App() {
   // Extraction settings
   const [fps, setFps] = useState(24.0)
   const [sampleRate, setSampleRate] = useState(48000)
+  const [bitDepth, setBitDepth] = useState('int16')
   const [hpf, setHpf] = useState(40.0)
   const [lpf, setLpf] = useState(13500.0)
   const [overlap, setOverlap] = useState(0.05)
@@ -131,8 +163,10 @@ function App() {
   // Crop overlay interaction
   const imgRef = useRef(null)
   const importSettingsRef = useRef(null)
+  const loadProjectRef = useRef(null)
   const [dragState, setDragState] = useState(null)
   const [extracting, setExtracting] = useState(false)
+  const [cancelRequested, setCancelRequested] = useState(false)
   const [status, setStatus] = useState('')
   const [extractProgress, setExtractProgress] = useState(null)
   const [isVideoSource, setIsVideoSource] = useState(false)
@@ -194,6 +228,7 @@ function App() {
         setIntegrate(saved.integrate ?? true)
         setFps(saved.fps ?? data.fps ?? 24.0)
         setSampleRate(saved.sampleRate ?? 48000)
+        setBitDepth(saved.bitDepth ?? 'int16')
         setHpf(saved.hpf ?? 40.0)
         setLpf(saved.lpf ?? 13500.0)
         setOverlap(saved.overlap ?? 0.05)
@@ -210,6 +245,16 @@ function App() {
         if (data.fps != null) setFps(data.fps)
         setStartFrame(0)
         setEndFrame(data.num_frames - 1)
+        // No saved crop for this path — default the soundtrack region to
+        // the full frame height (top 0, track height = frame height)
+        // rather than leaving whatever crop was left over from a
+        // previously-loaded project (or the component's initial
+        // placeholder values). Those are calibrated to one reference scan
+        // size, so on a shorter frame cropTop+trackHeight could exceed the
+        // frame entirely, pushing the crop box off-screen and making it
+        // hard to drag back into view.
+        setCropTop(0)
+        setTrackHeight(data.frame_height)
       }
 
       setLoaded(true)
@@ -217,6 +262,7 @@ function App() {
       setIsVideoSource(data.fps != null)
       const label = data.fps != null ? 'video' : 'image sequence'
       setStatus(`Loaded ${data.num_frames} frames (${data.frame_width}×${data.frame_height}, ${label})`)
+      return data
     } catch (e) {
       setLoadError(e.message)
     }
@@ -244,14 +290,14 @@ function App() {
       cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
-      fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
+      fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
-      fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
+      fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame])
 
@@ -417,6 +463,7 @@ function App() {
         integrate,
         fps,
         sampleRate,
+        bitDepth,
         hpf,
         lpf,
         overlap,
@@ -434,7 +481,7 @@ function App() {
 
     const safeBase = (inputDir.split(/[\\/]/).filter(Boolean).pop() || 'optical2digital')
       .replace(/[^a-z0-9._-]+/gi, '_')
-    const filename = `${safeBase}-settings.json`
+    const filename = `${safeBase}-settings.o2d`
     const content = JSON.stringify(payload, null, 2)
 
     if (hasNativeBrowse) {
@@ -454,14 +501,46 @@ function App() {
     a.click()
     URL.revokeObjectURL(url)
     setStatus(`Saved settings file: ${filename}`)
-  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
+  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
 
-  const handleImportSettingsFile = useCallback(async (e) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+  // Shared by handleImportSettingsFile (settings-only import) and
+  // handleLoadProjectFile (.o2d project load) so both apply the same
+  // field-by-field coercion/defaults instead of duplicating this block.
+  const applyImportedSettings = useCallback((saved, maxFrame) => {
+    setCropTop(Number(saved.cropTop ?? 297))
+    setTrackHeight(Number(saved.trackHeight ?? 3070))
+    setCropLeft(Number(saved.cropLeft ?? 849))
+    setCropRight(Number(saved.cropRight ?? 1191))
+    setRotate(Number(saved.rotate ?? 0))
+    setNegative(Boolean(saved.negative ?? false))
+    setDminValue(Number(saved.dminValue ?? 1.0))
+    setDminHeadroom(Number(saved.dminHeadroom ?? 0.2))
+    setBinaryMask(Boolean(saved.binaryMask ?? false))
+    setBinaryLb(Number(saved.binaryLb ?? 96))
+    setBinaryUb(Number(saved.binaryUb ?? 255))
+    setIntegrate(Boolean(saved.integrate ?? true))
+    setFps(Number(saved.fps ?? 24.0))
+    setSampleRate(Number(saved.sampleRate ?? 48000))
+    setBitDepth(['int16', 'int24', 'int32', 'float32'].includes(saved.bitDepth) ? saved.bitDepth : 'int16')
+    setHpf(Number(saved.hpf ?? 40.0))
+    setLpf(Number(saved.lpf ?? 13500.0))
+    setOverlap(Number(saved.overlap ?? 0.05))
+    setAudioOffset(Number(saved.audioOffset ?? 21))
+    setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
+    setReverse(Boolean(saved.reverse ?? false))
+    setStereo(Boolean(saved.stereo ?? true))
+    setShowStereoGuides(Boolean(saved.showStereoGuides ?? true))
+    setShowZoom(Boolean(saved.showZoom ?? true))
+    setZoomLevel(Number(saved.zoomLevel ?? 6))
+    setStartFrame(Math.max(0, Math.min(Number(saved.startFrame ?? 0), maxFrame)))
+    setEndFrame(Math.max(0, Math.min(Number(saved.endFrame ?? maxFrame), maxFrame)))
+  }, [])
 
+  // Parses+applies settings JSON text regardless of where it came from (web
+  // <input type=file> vs. the native picker below) — see the native-picker
+  // comment for why there are two sources.
+  const processSettingsText = useCallback((text, sourceName) => {
     try {
-      const text = await file.text()
       const payload = JSON.parse(text)
       const saved = payload?.settings ?? payload
       if (!saved || typeof saved !== 'object') {
@@ -472,40 +551,82 @@ function App() {
         setInputDir(payload.inputDir)
       }
 
-      const maxFrame = Math.max(numFrames - 1, 0)
-      setCropTop(Number(saved.cropTop ?? 297))
-      setTrackHeight(Number(saved.trackHeight ?? 3070))
-      setCropLeft(Number(saved.cropLeft ?? 849))
-      setCropRight(Number(saved.cropRight ?? 1191))
-      setRotate(Number(saved.rotate ?? 0))
-      setNegative(Boolean(saved.negative ?? false))
-      setDminValue(Number(saved.dminValue ?? 1.0))
-      setDminHeadroom(Number(saved.dminHeadroom ?? 0.2))
-      setBinaryMask(Boolean(saved.binaryMask ?? false))
-      setBinaryLb(Number(saved.binaryLb ?? 96))
-      setBinaryUb(Number(saved.binaryUb ?? 255))
-      setIntegrate(Boolean(saved.integrate ?? true))
-      setFps(Number(saved.fps ?? 24.0))
-      setSampleRate(Number(saved.sampleRate ?? 48000))
-      setHpf(Number(saved.hpf ?? 40.0))
-      setLpf(Number(saved.lpf ?? 13500.0))
-      setOverlap(Number(saved.overlap ?? 0.05))
-      setAudioOffset(Number(saved.audioOffset ?? 21))
-      setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
-      setReverse(Boolean(saved.reverse ?? false))
-      setStereo(Boolean(saved.stereo ?? true))
-      setShowStereoGuides(Boolean(saved.showStereoGuides ?? true))
-      setShowZoom(Boolean(saved.showZoom ?? true))
-      setZoomLevel(Number(saved.zoomLevel ?? 6))
-      setStartFrame(Math.max(0, Math.min(Number(saved.startFrame ?? 0), maxFrame)))
-      setEndFrame(Math.max(0, Math.min(Number(saved.endFrame ?? maxFrame), maxFrame)))
-      setStatus(`Loaded settings from ${file.name}`)
+      applyImportedSettings(saved, Math.max(numFrames - 1, 0))
+      setStatus(`Loaded settings from ${sourceName}`)
     } catch (err) {
       setStatus(`Error loading settings: ${err.message}`)
+    }
+  }, [loaded, numFrames, applyImportedSettings])
+
+  const handleImportSettingsFile = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      processSettingsText(await file.text(), file.name)
     } finally {
       e.target.value = ''
     }
-  }, [loaded, numFrames])
+  }, [processSettingsText])
+
+  // --- Load an entire .o2d project file: opens the referenced folder/video
+  // and applies its settings in one step (initial-screen "Load Project"). ---
+  const processProjectText = useCallback(async (text, sourceName) => {
+    try {
+      const payload = JSON.parse(text)
+      const saved = payload?.settings
+      if (typeof payload?.inputDir !== 'string' || !payload.inputDir.trim() || !saved || typeof saved !== 'object') {
+        throw new Error('Invalid project file')
+      }
+
+      setInputDir(payload.inputDir)
+      const data = await loadProject(payload.inputDir)
+      if (!data) return  // loadProject already set loadError
+
+      applyImportedSettings(saved, Math.max(data.num_frames - 1, 0))
+      setStatus(`Loaded project from ${sourceName}`)
+    } catch (err) {
+      setLoadError(err.message)
+    }
+  }, [loadProject, applyImportedSettings])
+
+  const handleLoadProjectFile = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      await processProjectText(await file.text(), file.name)
+    } finally {
+      e.target.value = ''
+    }
+  }, [processProjectText])
+
+  // --- Native .o2d/.json picker (packaged desktop app only) ---
+  //
+  // WKWebView (the native window's engine on macOS) maps <input accept> to
+  // an NSOpenPanel filter via each extension's registered Uniform Type
+  // Identifier. ".json" has a system UTI so it filters fine, but ".o2d" is
+  // a custom, unregistered extension — WKWebView silently drops it from the
+  // filter instead of matching it, so .o2d files never appear in the panel
+  // even though .json ones do. This is the exact same limitation
+  // choose_video_file() in launcher.py already works around for arbitrary
+  // video extensions, by going through pywebview's own native file dialog
+  // (Cocoa file_types filtering) instead of the HTML accept attribute. The
+  // Api has no filesystem access from the JS side, so open_o2d_file() reads
+  // the chosen file server-side and returns its content directly, mirroring
+  // save_text_file()'s "native panel + direct read/write, no backend round
+  // trip" pattern. Only used when hasNativeBrowse is true; the dev/browser
+  // build keeps the plain <input type=file> above, since Chromium/Firefox
+  // filter custom extensions correctly.
+  const handleImportSettingsNative = useCallback(async () => {
+    const result = await window.pywebview.api.open_o2d_file()
+    if (!result) return
+    processSettingsText(result.content, result.path.split(/[\\/]/).pop())
+  }, [processSettingsText])
+
+  const handleLoadProjectNative = useCallback(async () => {
+    const result = await window.pywebview.api.open_o2d_file()
+    if (!result) return
+    await processProjectText(result.content, result.path.split(/[\\/]/).pop())
+  }, [processProjectText])
 
   // --- Crop drag handling ---
   useEffect(() => {
@@ -655,6 +776,7 @@ function App() {
 
   const handleExtract = useCallback(async () => {
     setExtracting(true)
+    setCancelRequested(false)
     setExtractProgress(null)
 
     const rangeStart = Math.max(0, Math.min(startFrame, endFrame))
@@ -676,7 +798,7 @@ function App() {
           binary_lb: binaryLb,
           binary_ub: binaryUb,
           integrate,
-          fps, sample_rate: sampleRate, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
+          fps, sample_rate: sampleRate, bit_depth: bitDepth, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
           soundtrack_color: soundtrackColor,
           stereo,
           start_frame: startFrame,
@@ -689,7 +811,7 @@ function App() {
       }
 
       // Listen for SSE progress (auto-reconnects on transient drops)
-      await new Promise((resolve, reject) => {
+      const extractResult = await new Promise((resolve, reject) => {
         let resolved = false
         const connect = () => {
           const es = new EventSource(`${API}/api/extract/progress`)
@@ -714,7 +836,8 @@ function App() {
               es.close()
               if (!resolved) {
                 resolved = true
-                data.error ? reject(new Error(data.error)) : resolve()
+                if (data.error) reject(new Error(data.error))
+                else resolve({ cancelled: !!data.cancelled })
               }
             }
           }
@@ -742,6 +865,11 @@ function App() {
         }
         connect()
       })
+
+      if (extractResult.cancelled) {
+        setStatus('Extraction cancelled')
+        return
+      }
 
       if (hasNativeBrowse) {
         // Blob + <a download> navigates the packaged app's webview to the
@@ -778,15 +906,33 @@ function App() {
       setStatus(`Error: ${e.message}`)
     } finally {
       setExtracting(false)
+      setCancelRequested(false)
       setExtractProgress(null)
     }
-  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+
+  const handleCancelExtract = useCallback(async () => {
+    setCancelRequested(true)
+    setStatus('Cancelling extraction...')
+    try {
+      await fetch(`${API}/api/extract/cancel`, { method: 'POST' })
+    } catch {
+      // The SSE stream's own error handling will surface a real connection
+      // failure; this request failing to send just means the button click
+      // is a no-op, not a new error state.
+    }
+  }, [])
 
   const handleExportVideo = useCallback(async () => {
     setExportingVideo(true)
+    setCancelRequested(false)
     setExportVideoStatus('Starting...')
     setExportVideoProgress(null)
     setStatus('Starting video export...')
+
+    const rangeStart = Math.max(0, Math.min(startFrame, endFrame))
+    const rangeEnd = Math.min(numFrames - 1, Math.max(startFrame, endFrame))
+    setFrameIndex(reverse ? rangeEnd : rangeStart)
 
     try {
       const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
@@ -802,7 +948,7 @@ function App() {
           binary_lb: binaryLb,
           binary_ub: binaryUb,
           integrate,
-          fps, sample_rate: sampleRate, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
+          fps, sample_rate: sampleRate, bit_depth: bitDepth, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
           soundtrack_color: soundtrackColor,
           stereo,
           start_frame: startFrame,
@@ -815,7 +961,7 @@ function App() {
       }
 
       // Listen for SSE progress (auto-reconnects on transient drops)
-      await new Promise((resolve, reject) => {
+      const exportResult = await new Promise((resolve, reject) => {
         let resolved = false
         const connect = () => {
           const es = new EventSource(`${API}/api/export/video/progress`)
@@ -823,11 +969,21 @@ function App() {
             const data = JSON.parse(ev.data)
             setExportVideoProgress(data)
 
+            // Only the "Extracting audio" phase reports real per-frame
+            // progress (current/total) — the ffmpeg mux/render phase that
+            // follows has none (server.py zeroes both once that starts),
+            // so the frame viewer simply stays parked whichever frame
+            // extraction last landed on during that phase.
             if (data.total > 0 && data.current < data.total) {
+              const completed = Math.max(0, Math.min(data.current, data.total))
+              const currentFrame = reverse
+                ? Math.max(rangeStart, rangeEnd - Math.max(completed - 1, 0))
+                : Math.min(rangeEnd, rangeStart + Math.max(completed - 1, 0))
               const pct = Math.round((data.current / data.total) * 100)
               const text = `${data.phase}: ${data.current} / ${data.total} (${pct}%)`
               setExportVideoStatus(text)
               setStatus(text)
+              setFrameIndex(currentFrame)
             } else if (data.phase && !data.done) {
               setExportVideoStatus(data.phase)
               setStatus(data.phase)
@@ -836,7 +992,8 @@ function App() {
               es.close()
               if (!resolved) {
                 resolved = true
-                data.error ? reject(new Error(data.error)) : resolve()
+                if (data.error) reject(new Error(data.error))
+                else resolve({ cancelled: !!data.cancelled })
               }
             }
           }
@@ -861,6 +1018,12 @@ function App() {
         }
         connect()
       })
+
+      if (exportResult.cancelled) {
+        setStatus('Video export cancelled')
+        setExportVideoStatus('Cancelled')
+        return
+      }
 
       if (hasNativeBrowse) {
         // Blob + <a download> navigates the packaged app's webview to the
@@ -898,9 +1061,22 @@ function App() {
       setExportVideoStatus(`Error: ${e.message}`)
     } finally {
       setExportingVideo(false)
+      setCancelRequested(false)
       setExportVideoProgress(null)
     }
-  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+
+  const handleCancelExportVideo = useCallback(async () => {
+    setCancelRequested(true)
+    setStatus('Cancelling video export...')
+    setExportVideoStatus('Cancelling...')
+    try {
+      await fetch(`${API}/api/export/video/cancel`, { method: 'POST' })
+    } catch {
+      // As with handleCancelExtract: a failed cancel request just means
+      // the click was a no-op, not a new error state.
+    }
+  }, [])
 
   return (
     <div className="app">
@@ -909,12 +1085,22 @@ function App() {
         <div className="load-overlay">
           <div className="load-dialog">
             <h2>Load Frames</h2>
-            {hasNativeBrowse && (
-              <div className="browse-actions">
-                <button className="btn-secondary" onClick={handleBrowseFolder}>Browse Folder…</button>
-                <button className="btn-secondary" onClick={handleBrowseVideo}>Browse Video File…</button>
-              </div>
-            )}
+            <div className="browse-actions">
+              <button className="btn-secondary" onClick={hasNativeBrowse ? handleLoadProjectNative : () => loadProjectRef.current?.click()}>Load Project…</button>
+              {hasNativeBrowse && (
+                <>
+                  <button className="btn-secondary" onClick={handleBrowseFolder}>Browse Folder…</button>
+                  <button className="btn-secondary" onClick={handleBrowseVideo}>Browse Video File…</button>
+                </>
+              )}
+            </div>
+            <input
+              ref={loadProjectRef}
+              type="file"
+              accept=".o2d,.json,application/json"
+              onChange={handleLoadProjectFile}
+              style={{ display: 'none' }}
+            />
             <input
               type="text"
               value={inputDir}
@@ -942,7 +1128,7 @@ function App() {
                 <button className="btn-secondary btn-small" onClick={handleExportSettings}>
                   Save Settings
                 </button>
-                <button className="btn-secondary btn-small" onClick={() => importSettingsRef.current?.click()}>
+                <button className="btn-secondary btn-small" onClick={hasNativeBrowse ? handleImportSettingsNative : () => importSettingsRef.current?.click()}>
                   Load Settings
                 </button>
                 <button className="btn-secondary btn-small" onClick={() => setShowLoad(true)}>Change</button>
@@ -1004,7 +1190,7 @@ function App() {
           <input
             ref={importSettingsRef}
             type="file"
-            accept=".json,application/json"
+            accept=".o2d,.json,application/json"
             onChange={handleImportSettingsFile}
             style={{ display: 'none' }}
           />
@@ -1063,6 +1249,15 @@ function App() {
               <div className="control-group">
                 <NumberInput label="FPS" value={fps} onChange={setFps} min={1} max={120} step={0.001} />
                 <NumberInput label="Sample Rate" value={sampleRate} onChange={setSampleRate} min={8000} max={192000} />
+                <div className="control-row">
+                  <label>Bit Depth</label>
+                  <select value={bitDepth} onChange={e => setBitDepth(e.target.value)}>
+                    <option value="int16">16-bit</option>
+                    <option value="int24">24-bit</option>
+                    <option value="int32">32-bit</option>
+                    <option value="float32">32-bit float</option>
+                  </select>
+                </div>
                 <SliderInput label="HPF (Hz)" value={hpf} onChange={setHpf} min={0} max={500} step={1} />
                 <SliderInput label="LPF (Hz)" value={lpf} onChange={setLpf} min={1000} max={24000} step={100} />
                 <SliderInput label="Overlap" value={overlap} onChange={setOverlap} min={0} max={0.5} step={0.01} />
@@ -1093,17 +1288,24 @@ function App() {
 
           {/* Start/End frame — always visible, shared across all panels */}
           <div className="control-group">
-            <NumberInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} />
-            <NumberInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} />
+            <FrameTimecodeInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} fps={fps} />
+            <FrameTimecodeInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} fps={fps} />
           </div>
 
           {/* Export */}
           {activePanel === 'export' && (
             <section className="extract-section">
               <h3>Export WAV</h3>
-              <button className="btn-primary" onClick={handleExtract} disabled={!loaded || extracting || exportingVideo}>
-                {extracting ? 'Extracting...' : 'Export Audio (WAV)'}
-              </button>
+              <div className="button-row">
+                <button className="btn-primary" onClick={handleExtract} disabled={!loaded || extracting || exportingVideo}>
+                  {extracting ? 'Extracting...' : 'Export Audio (WAV)'}
+                </button>
+                {extracting && (
+                  <button className="btn-secondary" onClick={handleCancelExtract} disabled={cancelRequested}>
+                    {cancelRequested ? 'Cancelling…' : 'Cancel'}
+                  </button>
+                )}
+              </div>
               <p className="hint" style={{ marginTop: 8 }}>
                 Channel in use: {soundtrackChannelLabel(soundtrackColor)}
               </p>
@@ -1118,38 +1320,24 @@ function App() {
             </section>
           )}
 
-          {activePanel === 'export' && isVideoSource && (
+          {activePanel === 'export' && (
             <section className="extract-section">
               <h3>Export Video</h3>
               <p className="hint">
-                Replaces the audio track of the original video with the extracted soundtrack, trimmed to the Start/End Frame range above. The picture is copied without re-encoding.
+                {isVideoSource
+                  ? 'Replaces the audio track of the original video with the extracted soundtrack, trimmed to the Start/End Frame range above. The picture is copied without re-encoding.'
+                  : 'Renders the full original scan frames (Start/End Frame range, at the FPS above, with Rotation applied) into a new video with the extracted soundtrack as its audio.'}
               </p>
-              <button className="btn-primary" onClick={handleExportVideo} disabled={!loaded || extracting || exportingVideo}>
-                {exportingVideo ? 'Exporting...' : 'Export Video (MP4)'}
-              </button>
-              {exportingVideo && (
-                <p className="hint" style={{ marginTop: 8 }}>{exportVideoStatus}</p>
-              )}
-              {exportingVideo && exportVideoProgress && exportVideoProgress.total > 0 && (
-                <div className="progress-bar">
-                  <div
-                    className="progress-bar-fill"
-                    style={{ width: `${Math.round((exportVideoProgress.current / exportVideoProgress.total) * 100)}%` }}
-                  />
-                </div>
-              )}
-            </section>
-          )}
-
-          {activePanel === 'export' && !isVideoSource && (
-            <section className="extract-section">
-              <h3>Export Video</h3>
-              <p className="hint">
-                Renders the full original scan frames (Start/End Frame range, at the FPS above, with Rotation applied) into a new video with the extracted soundtrack as its audio.
-              </p>
-              <button className="btn-primary" onClick={handleExportVideo} disabled={!loaded || extracting || exportingVideo}>
-                {exportingVideo ? 'Exporting...' : 'Export Video (MP4)'}
-              </button>
+              <div className="button-row">
+                <button className="btn-primary" onClick={handleExportVideo} disabled={!loaded || extracting || exportingVideo}>
+                  {exportingVideo ? 'Exporting...' : 'Export Video (MP4)'}
+                </button>
+                {exportingVideo && (
+                  <button className="btn-secondary" onClick={handleCancelExportVideo} disabled={cancelRequested}>
+                    {cancelRequested ? 'Cancelling…' : 'Cancel'}
+                  </button>
+                )}
+              </div>
               {exportingVideo && (
                 <p className="hint" style={{ marginTop: 8 }}>{exportVideoStatus}</p>
               )}
@@ -1443,6 +1631,49 @@ function NumberInput({ label, value, onChange, min, max, step, disabled }) {
       <label>{label}</label>
       <input type="number" min={min} max={max} step={step || 1} value={value}
         onChange={e => onChange(Number(e.target.value))} disabled={disabled} />
+    </div>
+  )
+}
+
+// Frame-number input paired with an editable HH:MM:SS:FF timecode field for
+// the same value — either one can be used to set the frame; they stay in
+// sync via the shared `value`/`onChange`.
+function FrameTimecodeInput({ label, value, onChange, min, max, fps }) {
+  const [tcText, setTcText] = useState(() => framesToTimecode(value, fps))
+
+  // Re-derive the displayed timecode whenever the underlying frame (or fps)
+  // changes — including right after a successful commit below, which
+  // reformats/clamps whatever the user typed into canonical form. This
+  // never fights the user's typing because `value` doesn't change on each
+  // keystroke here, only on commit or on external frame changes.
+  useEffect(() => {
+    setTcText(framesToTimecode(value, fps))
+  }, [value, fps])
+
+  const commitTimecode = () => {
+    const parsed = timecodeToFrames(tcText, fps)
+    if (parsed == null) {
+      setTcText(framesToTimecode(value, fps))  // invalid text — revert
+      return
+    }
+    onChange(Math.max(min, Math.min(parsed, max)))
+  }
+
+  return (
+    <div className="control-row">
+      <label>{label}</label>
+      <input type="number" min={min} max={max} step={1} value={value}
+        onChange={e => onChange(Number(e.target.value))} />
+      <input
+        type="text"
+        className="timecode-input"
+        value={tcText}
+        onChange={e => setTcText(e.target.value)}
+        onBlur={commitTimecode}
+        onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+        placeholder="HH:MM:SS:FF"
+        title="HH:MM:SS:FF timecode"
+      />
     </div>
   )
 }

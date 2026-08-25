@@ -32,6 +32,7 @@ Extracts audio from scanned motion picture film optical soundtracks (variable-ar
 import argparse
 import io
 import os
+import struct
 import sys
 import threading
 
@@ -42,6 +43,11 @@ from scipy.io import wavfile
 from scipy.signal import butter, sosfilt, resample
 
 import dpx_reader
+
+
+class ExtractionCancelled(Exception):
+    """Raised out of extract_audio() when a caller-supplied cancel_event is
+    set mid-run — see extract_audio()'s cancel_event parameter."""
 
 
 def parse_args():
@@ -721,13 +727,26 @@ def extract_audio(source, top, bottom, left, right,
                   soundtrack_color="B&W", dmin_percentile=99.5,
                   dmin_headroom=0.2, binary_mask=False,
                   binary_lb=96, binary_ub=255, dmin_value=None,
-                  integrate=False):
-    """Run the full extraction pipeline. Returns (sample_rate, int16_array).
+                  integrate=False, bit_depth="int16", cancel_event=None,
+                  progress_every=20):
+    """Run the full extraction pipeline. Returns (sample_rate, sample_array).
 
     *source* is a FrameSource object (ImageSequenceSource or VideoSource).
-    When *stereo* is True, returns a 2-channel int16 array (N, 2).
-    *progress_callback*, if provided, is called with (current, total) after
-    each frame is processed.
+    When *stereo* is True, returns a 2-channel array (N, 2).
+    *bit_depth* selects the output sample format — one of "int16" (default),
+    "int24", "int32", or "float32"; see _quantize_audio().
+    *cancel_event*, if provided, is a threading.Event checked periodically
+    during the run — ExtractionCancelled is raised as soon as it's set.
+    *progress_callback*, if provided, is called with (current, total) every
+    *progress_every* frames (and always on the last frame). Calling it on
+    every single frame sounds free — it's just a couple of attribute
+    writes — but it isn't free end-to-end: server.py's frame viewer treats
+    each distinct reported frame as a real position change and re-fetches
+    a freshly decoded/corrected preview image for it, so reporting too
+    finely turns every progress tick into extra concurrent image work
+    competing with this loop's own CPU-heavy decode/correct work. 20 is a
+    reasonable default; raise it for less UI churn, lower it (e.g. 1) for
+    maximum frame-viewer granularity if the caller can afford it.
     *phase_callback*, if provided, is called with a string describing the
     current processing phase.
     *start_frame* and *end_frame* allow processing a sub-range of frames
@@ -774,6 +793,8 @@ def extract_audio(source, top, bottom, left, right,
     total = len(indices)
 
     for count, idx in enumerate(indices):
+        if cancel_event is not None and cancel_event.is_set():
+            raise ExtractionCancelled()
         img = source.load_frame(idx - audio_offset)
         if img is None:
             # No corresponding source frame for this picture frame's
@@ -812,7 +833,13 @@ def extract_audio(source, top, bottom, left, right,
             all_right.append(r_ch)
         else:
             all_left.append(extract_scanline_audio(corrected))
-        if progress_callback and ((count + 1) % 20 == 0 or count + 1 == total):
+        # See progress_every in the docstring: batched (not called every
+        # frame) by default — reporting every frame makes server.py's
+        # frame viewer re-fetch a preview image on nearly every progress
+        # tick, which competes for CPU with this loop's own decode/correct
+        # work rather than being the free couple-of-attribute-writes it
+        # looks like in isolation.
+        if progress_callback and ((count + 1) % progress_every == 0 or count + 1 == total):
             progress_callback(count + 1, total)
 
     if len(missing_indices) == len(all_left):
@@ -837,6 +864,8 @@ def extract_audio(source, top, bottom, left, right,
         offsets = None
 
     def _process_channel(all_samples, label, shared_offsets=None):
+        if cancel_event is not None and cancel_event.is_set():
+            raise ExtractionCancelled()
         _phase(f"Stitching {label}")
         if shared_offsets is not None:
             raw_signal = apply_overlap_offsets(all_samples, shared_offsets)
@@ -860,23 +889,87 @@ def extract_audio(source, top, bottom, left, right,
         peak = np.max(np.abs(signal))
         if peak > 0:
             signal = signal / peak
-        return np.clip(signal * 32767, -32768, 32767).astype(np.int16)
+        return _quantize_audio(signal, bit_depth)
 
-    left_int16 = _process_channel(all_left, "audio" if not stereo else "left channel", offsets)
+    left_samples = _process_channel(all_left, "audio" if not stereo else "left channel", offsets)
     if stereo:
-        right_int16 = _process_channel(all_right, "right channel", offsets)
-        signal_int16 = np.column_stack([left_int16, right_int16])
+        right_samples = _process_channel(all_right, "right channel", offsets)
+        signal_out = np.column_stack([left_samples, right_samples])
     else:
-        signal_int16 = left_int16
+        signal_out = left_samples
 
-    return sample_rate, signal_int16
+    return sample_rate, signal_out
 
 
-def extract_audio_to_wav_bytes(source, **kwargs):
+_BIT_DEPTHS = ("int16", "int24", "int32", "float32")
+
+
+def _quantize_audio(signal, bit_depth):
+    """Quantize a float64 signal already normalized to [-1, 1] into the
+    given output sample format.
+
+    int24 has no native numpy/C integer type, so its values are held in an
+    int32 container (still only spanning the 24-bit signed range,
+    [-2**23, 2**23 - 1]) — packing those into an actual 24-bit-per-sample
+    WAV file happens in _write_wav_int24(), the only place that needs to
+    know int24 is special.
+    """
+    if bit_depth == "int16":
+        return np.clip(signal * 32767, -32768, 32767).astype(np.int16)
+    if bit_depth == "int24":
+        return np.clip(signal * 8388607, -8388608, 8388607).astype(np.int32)
+    if bit_depth == "int32":
+        return np.clip(signal * 2147483647, -2147483648, 2147483647).astype(np.int32)
+    if bit_depth == "float32":
+        return np.clip(signal, -1.0, 1.0).astype(np.float32)
+    raise ValueError(f"Unsupported bit_depth: {bit_depth!r} (expected one of {_BIT_DEPTHS})")
+
+
+def _write_wav_int24(buf, sample_rate, samples):
+    """Write a standard 24-bit PCM WAV file.
+
+    scipy.io.wavfile can't emit 24-bit output directly (there's no native
+    int24 numpy/C type for it to infer a format from), so this packs each
+    sample's low 3 bytes (little-endian) by hand into a minimal RIFF/WAVE
+    container. *samples* holds int32 values already clipped to the 24-bit
+    signed range by _quantize_audio() — for values in that range, dropping
+    the top byte of their little-endian int32 form is exactly the correct
+    3-byte two's-complement encoding (the dropped byte is pure sign
+    extension, 0x00 or 0xFF).
+    """
+    mono = samples.ndim == 1
+    n_channels = 1 if mono else samples.shape[1]
+    interleaved = samples if mono else samples.reshape(-1)
+
+    raw = interleaved.astype("<i4").tobytes()
+    data = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 4)[:, :3].tobytes()
+    if len(data) % 2:
+        data += b"\x00"  # RIFF chunks must be even-sized
+
+    bytes_per_sample = 3
+    block_align = n_channels * bytes_per_sample
+    byte_rate = sample_rate * block_align
+    fmt_chunk = struct.pack("<HHIIHH", 1, n_channels, sample_rate, byte_rate, block_align, 24)
+
+    buf.write(b"RIFF")
+    buf.write(struct.pack("<I", 4 + (8 + len(fmt_chunk)) + (8 + len(data))))
+    buf.write(b"WAVE")
+    buf.write(b"fmt ")
+    buf.write(struct.pack("<I", len(fmt_chunk)))
+    buf.write(fmt_chunk)
+    buf.write(b"data")
+    buf.write(struct.pack("<I", len(data)))
+    buf.write(data)
+
+
+def extract_audio_to_wav_bytes(source, bit_depth="int16", **kwargs):
     """Run extraction and return the WAV file as an in-memory bytes object."""
-    sr, samples = extract_audio(source, **kwargs)
+    sr, samples = extract_audio(source, bit_depth=bit_depth, **kwargs)
     buf = io.BytesIO()
-    wavfile.write(buf, sr, samples)
+    if bit_depth == "int24":
+        _write_wav_int24(buf, sr, samples)
+    else:
+        wavfile.write(buf, sr, samples)
     buf.seek(0)
     return buf.read()
 
