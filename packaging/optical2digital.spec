@@ -54,6 +54,11 @@ datas = [
 ]
 if IS_MACOS:
     datas.append((str(FFMPEG_BUNDLE_DIR / 'libs'), 'libs'))
+    # DATA-typed entries land under Contents/Resources in the final .app
+    # (see PyInstaller's BUNDLE._process_bundle_toc) — that's exactly
+    # where AppKit's standard About panel looks for a Credits.rtf to show
+    # as its scrollable credits pane.
+    datas.append((str(ROOT_DIR / 'packaging' / 'Credits.rtf'), '.'))
 
 a = Analysis(
     # Relative script paths in Analysis() are resolved by PyInstaller relative
@@ -107,4 +112,17 @@ if IS_MACOS:
         icon=ICON_PATH,
         bundle_identifier='com.mikolasolutions.optical2digital',
         version=APP_VERSION,
+        # info_plist keys are merged into (and override) PyInstaller's
+        # generated Info.plist — see BUNDLE.assemble() in
+        # PyInstaller/building/osx.py. These two feed the "About
+        # Optical2Digital" panel: NSHumanReadableCopyright is the line
+        # shown directly under the version, and CFBundleVersion is the
+        # build number some tooling/notarization steps expect alongside
+        # CFBundleShortVersionString (which `version=` above already
+        # sets). The Credits.rtf bundled above (see `datas`) supplies the
+        # panel's scrollable credits text.
+        info_plist={
+            'NSHumanReadableCopyright': 'Copyright © 2026 Kyle Mikolajczyk. Released under the GNU General Public License v3.0.',
+            'CFBundleVersion': APP_VERSION,
+        },
     )
