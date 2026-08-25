@@ -738,6 +738,19 @@ def extract_audio(source, top, bottom, left, right,
     in the scan, at frame N - audio_offset, so each picture index in
     [start_frame, end_frame] is read for audio at (idx - audio_offset)
     rather than idx itself.
+
+    The returned audio is NOT the same length as the picture range: it
+    starts with audio_offset frames of silence (there is no scanned
+    soundtrack before frame 0, so the first audio_offset picture frames
+    have nothing to play), and it *extends* audio_offset frames past
+    end_frame (the source frames at the very end of the scan hold real
+    soundtrack data for picture positions beyond end_frame that were
+    simply never scanned as picture — that real audio is kept rather than
+    discarded). Net result: len(audio) == len(picture) + audio_offset
+    frames' worth of samples, with a silent lead-in and a "real audio, no
+    picture" tail. Callers muxing this against a picture track should NOT
+    trim to the shorter stream (e.g. ffmpeg's -shortest) — the picture
+    track ending before the audio track does is expected.
     """
     def _phase(msg):
         if phase_callback:
@@ -751,7 +764,11 @@ def extract_audio(source, top, bottom, left, right,
     _phase("Processing frames")
     all_left = []
     all_right = [] if stereo else None
-    indices = list(range(start_frame, end_frame + 1))
+    missing_indices = []
+    # Extend past end_frame by audio_offset frames to capture the real
+    # trailing soundtrack data described above (only when audio_offset is
+    # positive -- the physically-typical case of sound printed earlier).
+    indices = list(range(start_frame, end_frame + 1 + max(audio_offset, 0)))
     if reverse:
         indices = indices[::-1]
     total = len(indices)
@@ -759,6 +776,18 @@ def extract_audio(source, top, bottom, left, right,
     for count, idx in enumerate(indices):
         img = source.load_frame(idx - audio_offset)
         if img is None:
+            # No corresponding source frame for this picture frame's
+            # audio_offset-shifted soundtrack position -- most commonly
+            # because idx - audio_offset is before the start of the scan.
+            # Record a placeholder now and backfill it with silence below
+            # (once a real chunk's length is known) rather than dropping
+            # it: dropping would shrink the output track by audio_offset
+            # frames' worth of time and slide all audio earlier, silently
+            # undoing the offset instead of applying it.
+            missing_indices.append(len(all_left))
+            all_left.append(None)
+            if stereo:
+                all_right.append(None)
             continue
         corrected = crop_and_correct(
             img,
@@ -786,8 +815,16 @@ def extract_audio(source, top, bottom, left, right,
         if progress_callback and ((count + 1) % 20 == 0 or count + 1 == total):
             progress_callback(count + 1, total)
 
-    if not all_left:
+    if len(missing_indices) == len(all_left):
         raise ValueError("No frames were successfully processed")
+
+    if missing_indices:
+        template = next(chunk for chunk in all_left if chunk is not None)
+        silence = np.zeros_like(template)
+        for i in missing_indices:
+            all_left[i] = silence.copy()
+            if stereo:
+                all_right[i] = silence.copy()
 
     # Compute overlap offsets once from mono (or left channel) for sample-accurate sync
     if stereo and overlap > 0 and len(all_left) > 1:
@@ -888,15 +925,32 @@ def main():
 
     # --- Process frames ---
     all_samples = []
+    missing_indices = []
 
-    indices = list(range(num_frames))
+    # Extend past the last picture frame by audio_offset frames: the source
+    # frames at the very end of the scan hold real soundtrack data for
+    # picture positions beyond num_frames - 1 that were never scanned as
+    # picture -- see extract_audio()'s docstring for the full explanation.
+    indices = list(range(num_frames + max(args.audio_offset, 0)))
     if args.reverse:
         indices = indices[::-1]
+    total_indices = len(indices)
 
     for count, frame_idx in enumerate(indices):
         img = source.load_frame(frame_idx - args.audio_offset)
         if img is None:
-            print(f"  Warning: Could not read frame {frame_idx - args.audio_offset}, skipping.", file=sys.stderr)
+            # No corresponding source frame for this picture frame's
+            # audio_offset-shifted soundtrack position -- most commonly
+            # because frame_idx - args.audio_offset is before the start of
+            # the scan. Backfilled with silence below (once a real chunk's
+            # length is known) rather than dropped: dropping would shrink
+            # the output track by audio_offset frames' worth of time and
+            # slide all audio earlier, silently undoing the offset instead
+            # of applying it.
+            print(f"  Note: no source frame at {frame_idx - args.audio_offset} "
+                  f"(audio_offset={args.audio_offset}); using silence.", file=sys.stderr)
+            missing_indices.append(len(all_samples))
+            all_samples.append(None)
             continue
 
         img_corrected = crop_and_correct(
@@ -927,8 +981,18 @@ def main():
         all_samples.append(frame_samples)
 
         # Progress
-        if (count + 1) % 50 == 0 or (count + 1) == num_frames:
-            print(f"  Processed {count + 1}/{num_frames} frames", file=sys.stderr)
+        if (count + 1) % 50 == 0 or (count + 1) == total_indices:
+            print(f"  Processed {count + 1}/{total_indices} frames", file=sys.stderr)
+
+    if len(missing_indices) == len(all_samples):
+        print("Error: no frames were successfully processed", file=sys.stderr)
+        sys.exit(1)
+
+    if missing_indices:
+        template = next(chunk for chunk in all_samples if chunk is not None)
+        silence = np.zeros_like(template)
+        for i in missing_indices:
+            all_samples[i] = silence.copy()
 
     # Stitch frames with overlap detection and cross-fade
     if args.overlap > 0:
@@ -940,7 +1004,13 @@ def main():
     print(f"Raw signal: {len(raw_signal)} samples at native rate ~{native_rate:.0f} Hz")
 
     # --- Resample to target sample rate ---
-    target_num_samples = int(len(raw_signal) * args.sample_rate / native_rate)
+    # Target length is anchored to the true elapsed time (frame count / fps),
+    # not to len(raw_signal): overlap-based stitching above removes
+    # genuinely duplicated (overscanned) content, which shortens raw_signal
+    # without changing how much real time these frames actually span.
+    # Deriving the target from raw_signal's length would shrink the output
+    # audio by however much overlap was removed.
+    target_num_samples = int(round(len(all_samples) * args.sample_rate / args.fps))
     print(f"Resampling to {args.sample_rate} Hz ({target_num_samples} samples)...")
     signal = resample(raw_signal, target_num_samples)
 

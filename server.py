@@ -623,8 +623,13 @@ _EVEN_DIMS_FILTER = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_frame):
     """Mux extracted WAV audio onto a trimmed copy of the original video (stream-copy video).
 
-    The WAV is already trimmed to [start_frame, end_frame] by extract_audio, so only
-    the video input is trimmed here — trimming both would double-trim.
+    The video input is trimmed to [start_frame, end_frame] here. The WAV is
+    NOT the same length: extract_audio() pads it with audio_offset frames of
+    leading silence and audio_offset frames of real trailing audio beyond
+    end_frame (see its docstring) — so it always ends up a bit longer than
+    the trimmed video. No -shortest here: the output is intentionally
+    allowed to run past the video's end with audio-only content, rather than
+    silently clipping that trailing real audio to match the shorter video.
     """
     start_time = start_frame / fps
     end_time = (end_frame + 1) / fps
@@ -645,7 +650,6 @@ def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_fram
         "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-shortest",
         "-movflags", "+faststart",
         out_path,
     ]
@@ -653,7 +657,15 @@ def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_fram
 
 
 def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame, end_frame, tmpdir):
-    """Build a concat-demuxer list from the full original scan frames and render to MP4."""
+    """Build a concat-demuxer list from the full original scan frames and render to MP4.
+
+    The picture track spans exactly [start_frame, end_frame]. The WAV is
+    longer than that (see extract_audio()'s docstring: audio_offset frames
+    of leading silence plus audio_offset frames of real trailing audio
+    beyond end_frame), so the picture stream intentionally ends before the
+    audio does. No -shortest here: that would silently clip the real
+    trailing audio to match the shorter picture track.
+    """
     frame_duration = 1.0 / fps
     list_path = os.path.join(tmpdir, "frames.txt")
     with open(list_path, "w") as f:
@@ -689,7 +701,6 @@ def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame,
         "-r", f"{fps}",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-shortest",
         "-movflags", "+faststart",
         out_path,
     ]
