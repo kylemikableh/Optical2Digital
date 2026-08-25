@@ -308,6 +308,17 @@ h1, h2, h3 { font-weight: 600; }
   font-size: 12px;
 }
 
+.control-row input.timecode-input {
+  width: 92px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 button {
   padding: 8px 16px;
   border: none;
@@ -418,6 +429,8 @@ select {
 .error { color: var(--accent); font-size: 13px; margin-top: 8px; }
 
 .extract-section { display: flex; flex-direction: column; gap: 8px; }
+
+.button-row { display: flex; gap: 8px; align-items: center; }
 .extract-section .btn-primary { width: 100%; padding: 12px; font-size: 14px; }
 .progress-bar { width: 100%; height: 8px; background: var(--surface); border-radius: 4px; overflow: hidden; }
 .progress-bar-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; border-radius: 4px; }
