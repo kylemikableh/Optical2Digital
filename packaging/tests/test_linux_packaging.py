@@ -56,13 +56,13 @@ def test_control_template_fields_and_placeholders():
 
 
 def test_control_depends_covers_qtwebengine_essentials():
-    # The two dependencies whose absence most commonly breaks a
-    # PyInstaller-bundled QtWebEngine app: libxcb-cursor0 (hard Qt 6.5+
-    # requirement for the xcb platform plugin) and libnss3 (dlopen'd at
-    # runtime for the cert store; PyInstaller's scan misses it).
+    # libqt6webenginecore6 pulls the whole Chromium/QtWebEngine leaf-library
+    # closure that PySide6's wheel doesn't bundle. libxcb-cursor0 (Qt 6.5+
+    # xcb platform plugin) is only a Recommends of it, so it's listed
+    # explicitly; libnss3 likewise as belt-and-suspenders.
     text = _read("control.in")
     depends = text.split("Depends:", 1)[1].split("Description:", 1)[0]
-    for pkg in ("libxcb-cursor0", "libnss3"):
+    for pkg in ("libqt6webenginecore6", "libxcb-cursor0", "libnss3"):
         assert pkg in depends, f"control.in Depends is missing {pkg}"
 
 

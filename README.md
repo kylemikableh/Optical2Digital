@@ -50,7 +50,7 @@ No Python, Node, or ffmpeg install needed — everything required is bundled ins
    `Optical2Digital-linux-amd64.deb` for a normal PC/laptop, or
    `Optical2Digital-linux-arm64.deb` for an ARM machine (Raspberry Pi, Ampere, a VM on Apple Silicon).
 
-2. Install it with `apt` (this pulls in the few system libraries the bundled UI needs):
+2. Install it with `apt` (this pulls in the system Qt/WebEngine runtime libraries the bundled UI needs):
 
    ```bash
    cd ~/Downloads

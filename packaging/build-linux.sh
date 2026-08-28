@@ -84,7 +84,8 @@ then
   echo "  - missing package?  pip install pyside6 qtpy" >&2
   echo "    (the 'pyside6' metapackage pulls PySide6-Addons, which has QtWebEngine)" >&2
   echo "  - 'cannot open shared object file' above?  install that system lib" >&2
-  echo "    (QtWebEngine needs e.g. libnss3, libminizip1 on the build box too)." >&2
+  echo "    (e.g. 'sudo apt install libqt6webenginecore6' drags in the whole" >&2
+  echo "     Chromium/QtWebEngine leaf-library closure PySide6 doesn't bundle)." >&2
   exit 1
 fi
 
