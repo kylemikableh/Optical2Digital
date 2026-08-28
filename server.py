@@ -289,6 +289,7 @@ class ExtractRequest(BaseModel):
     soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = "B&W"
     reverse: bool = False
     stereo: bool = False
+    channel_order: Literal["LR", "RL"] = "LR"
     start_frame: int = 0
     end_frame: int | None = None
     bit_depth: Literal["int16", "int24", "int32", "float32"] = "int16"
@@ -353,6 +354,7 @@ def extract(req: ExtractRequest):
                 audio_offset=req.audio_offset,
                 soundtrack_color=req.soundtrack_color,
                 stereo=req.stereo,
+                channel_order=req.channel_order,
                 reverse=req.reverse,
                 start_frame=req.start_frame,
                 end_frame=req.end_frame,
@@ -498,6 +500,7 @@ def export_video(req: ExtractRequest):
                     audio_offset=req.audio_offset,
                     soundtrack_color=req.soundtrack_color,
                     stereo=req.stereo,
+                    channel_order=req.channel_order,
                     reverse=req.reverse,
                     start_frame=req.start_frame,
                     end_frame=req.end_frame,

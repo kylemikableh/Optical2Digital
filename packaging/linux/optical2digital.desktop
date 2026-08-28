@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Optical2Digital
+GenericName=Optical Audio Converter
+Comment=Convert optical film audio scans to digital PCM
+Exec=optical2digital
+Icon=optical2digital
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=optical;audio;film;dpx;pcm;dolby;scan;
+StartupWMClass=Optical2Digital

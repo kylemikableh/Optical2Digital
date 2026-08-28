@@ -246,12 +246,169 @@ jobs:
             packaging/dist/Optical2Digital-Setup-arm64.exe
           generate_release_notes: true
 
+  # ----------------------------------------------------------------------
+  # Linux (.deb). Split into two near-identical per-arch jobs to match the
+  # Windows jobs' style (rather than a matrix). The only real differences
+  # from build-macos are: the GUI backend (pywebview has no default on
+  # Linux, so PySide6 is added to the venv and bundled — see
+  # packaging/launcher.py / optical2digital.spec), the ffmpeg source
+  # (bundle_ffmpeg_linux.sh, BtbN linux static builds), and the packaging
+  # target (packaging/build-linux.sh -> a .deb via dpkg-deb).
+  #
+  # Both arches build on ubuntu-24.04(-arm). Ideally amd64 would build on
+  # 22.04 for a lower glibc floor (PyInstaller bundles no libc, so the .deb
+  # only runs where glibc >= the build host's), but PySide6 6.11's aarch64
+  # wheels are manylinux_2_39 (need glibc 2.39, so arm64 *must* use 24.04),
+  # and on 22.04 the QtWebEngine .so's also failed to import against that
+  # runner's older system libs. Keeping both on 24.04 is consistent and
+  # avoids that whack-a-mole. Net floor: Ubuntu 24.04 / Debian 13+
+  # (documented in README.md).
   build-linux:
-    name: Build Linux [placeholder]
-    runs-on: ubuntu-latest
+    name: Build Linux (.deb, amd64)
+    needs: version
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # needed to create the release and upload the .deb
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: TODO
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Build tools (imagemagick -> icon resize, desktop-file-utils ->
+      # desktop-file-validate, dpkg-dev -> dpkg-deb --root-owner-group, jq /
+      # xz-utils -> bundle_ffmpeg_linux.sh, xvfb -> headless smoke test).
+      #
+      # libqt6webenginecore6 is the distro's own QtWebEngine — we don't load
+      # it (PyInstaller bundles PySide6's Qt via rpath), but pulling it in
+      # drags along the whole Chromium/QtWebEngine leaf-library closure
+      # (libEGL, libminizip, harfbuzz, nss, ...) that PySide6's wheel does
+      # NOT bundle and that a headless runner lacks. Delegating that list to
+      # the distro package beats hand-maintaining ~40 entries and chasing
+      # each 24.04 t64 rename. Same package is the .deb's Depends: (see
+      # packaging/linux/control.in). The few explicit extras cover the Qt
+      # xcb platform plugin, which libqt6webenginecore6 only Recommends.
+      - name: Install system dependencies
         run: |
-          echo "TODO: implement Linux build (see build-macos job for the pattern)"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            imagemagick desktop-file-utils dpkg-dev jq xz-utils xvfb \
+            libqt6webenginecore6 \
+            libgl1 libegl1 libnss3 libxcb-cursor0 libxkbcommon-x11-0 libasound2t64
+
+      # Mirrors the build-macos job's venv step (see its comment for the
+      # opencv-python --no-build-isolation / CMAKE_ARGS reasoning — a no-op
+      # on Linux x86_64, where a manylinux wheel exists, but kept uniform),
+      # plus pyside6: the bundled Qt / QtWebEngine GUI backend for pywebview
+      # on Linux. PySide6 ships official PyInstaller hooks.
+      - name: Create Python virtualenv
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pyside6 qtpy
+          export CMAKE_ARGS="-DBUILD_opencv_dnn=OFF"
+          pip install --no-build-isolation opencv-python
+
+      # Frontend build, ffmpeg bundle, icon generation, PyInstaller, and
+      # .deb assembly in one shot — see packaging/build-linux.sh. Produces
+      # packaging/dist/Optical2Digital-linux-amd64.deb. APP_VERSION flows
+      # into packaging/optical2digital.spec (window title / app_version.py).
+      - name: Build .deb
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        run: ./packaging/build-linux.sh amd64
+
+      # Headless sanity check: launch the packaged binary under Xvfb,
+      # confirm the embedded server answers, then terminate it. The
+      # QTWEBENGINE_CHROMIUM_FLAGS / QT_QPA_PLATFORM here are what let
+      # QtWebEngine start on a GPU-less runner; benign libGL / DRI warnings
+      # on stderr are expected and not treated as failure.
+      - name: Smoke test (Xvfb)
+        run: |
+          export QTWEBENGINE_DISABLE_SANDBOX=1
+          export QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --disable-software-rasterizer --no-sandbox"
+          export QT_QPA_PLATFORM=xcb
+          xvfb-run -a python3 packaging/tests/smoke_linux.py
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/dist/Optical2Digital-linux-amd64.deb
+          generate_release_notes: true
+
+  build-linux-arm64:
+    name: Build Linux (.deb, arm64)
+    needs: version
+    # GitHub-hosted arm64 Linux runner (free for public repos). VERIFY at
+    # implementation/rollout time: availability, quota, and enrollment
+    # requirements for this runner label are worth reconfirming before
+    # relying on this for a real release — same caveat as build-windows-arm64.
+    #
+    # 24.04 is mandatory here (not just chosen for consistency with the
+    # amd64 job): PySide6 6.11's aarch64 wheels are manylinux_2_39, so
+    # 22.04-arm's glibc 2.35 can't install them at all.
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            imagemagick desktop-file-utils dpkg-dev jq xz-utils xvfb \
+            libqt6webenginecore6 \
+            libgl1 libegl1 libnss3 libxcb-cursor0 libxkbcommon-x11-0 libasound2t64
+
+      # Same as the amd64 job. The one arm64-specific fact — PySide6's
+      # aarch64 wheels need glibc 2.39 — is handled by running on 24.04-arm
+      # (see the runs-on comment above), not here.
+      - name: Create Python virtualenv
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install wheel cmake scikit-build setuptools packaging numpy scipy natsort fastapi uvicorn pydantic pywebview pyinstaller pyside6 qtpy
+          export CMAKE_ARGS="-DBUILD_opencv_dnn=OFF"
+          pip install --no-build-isolation opencv-python
+
+      - name: Build .deb
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        run: ./packaging/build-linux.sh arm64
+
+      - name: Smoke test (Xvfb)
+        run: |
+          export QTWEBENGINE_DISABLE_SANDBOX=1
+          export QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --disable-software-rasterizer --no-sandbox"
+          export QT_QPA_PLATFORM=xcb
+          xvfb-run -a python3 packaging/tests/smoke_linux.py
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/dist/Optical2Digital-linux-arm64.deb
+          generate_release_notes: true

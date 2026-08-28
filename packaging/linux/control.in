@@ -1,0 +1,18 @@
+Package: optical2digital
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Kyle Mikolajczyk <kyle@kylem.org>
+Installed-Size: @INSTALLED_SIZE@
+Section: sound
+Priority: optional
+Homepage: https://github.com/kylemikableh/Optical2Digital
+Depends: libc6, libstdc++6,
+ libqt6webenginecore6,
+ libgl1, libegl1, libnss3, libxcb-cursor0, libxkbcommon-x11-0,
+ libasound2t64 | libasound2
+Description: Optical film audio to digital PCM converter
+ Extracts and converts variable-area / variable-density optical soundtracks
+ from motion-picture film scans (image sequences or video) into digital PCM
+ audio, through a native desktop UI. The application bundles its own Python
+ runtime, web frontend, and a static ffmpeg, so nothing else needs to be
+ installed for it to run.

@@ -1,18 +1,38 @@
 """
-Desktop launcher for the packaged macOS app: starts the existing FastAPI
-server in a background thread and opens a native window pointed at it.
+Desktop launcher for the packaged app (macOS, Windows, Linux): starts the
+existing FastAPI server in a background thread and opens a native window
+pointed at it.
 
 This is the PyInstaller entry point (see packaging/optical2digital.spec).
 It is NOT used by the dev workflow (start-dev.sh) or the CLI
 (KylesOpticalDecoder.py) — server.py's own `if __name__ == "__main__"`
 block still runs `uvicorn.run(...)` directly for those, unchanged.
 """
+import os
 import pathlib
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+
+# pywebview auto-selects a GUI backend on macOS (Cocoa) and Windows
+# (EdgeWebView2), but has no default on Linux — this build bundles PySide6
+# (see packaging/build-linux.sh), so point pywebview at its Qt backend.
+# setdefault so a user can still override with PYWEBVIEW_GUI=gtk if they have
+# the system packages. Must run before `import webview` below (pywebview
+# reads this at import time). QTWEBENGINE_DISABLE_SANDBOX: QtWebEngine's
+# Chromium sandbox needs a setuid-root helper binary we can't ship from an
+# unsigned .deb, so disable it — standard practice for redistributed Qt
+# WebEngine apps. The /usr/bin/optical2digital wrapper sets this too.
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("PYWEBVIEW_GUI", "qt")
+    # pywebview's Qt backend goes through qtpy, which picks a binding from
+    # whatever's importable unless QT_API pins it. The bundle only carries
+    # PySide6, so say so explicitly rather than relying on autodetection
+    # inside the frozen app.
+    os.environ.setdefault("QT_API", "pyside6")
+    os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
 
 # When run directly (`python packaging/launcher.py`), Python only puts this
 # script's own directory on sys.path — add the repo root too so `import

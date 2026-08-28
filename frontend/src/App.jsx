@@ -154,6 +154,7 @@ function App() {
   const [soundtrackColor, setSoundtrackColor] = useState('B&W')
   const [reverse, setReverse] = useState(false)
   const [stereo, setStereo] = useState(true)
+  const [channelOrder, setChannelOrder] = useState('LR')
   const [showStereoGuides, setShowStereoGuides] = useState(true)
   const [showZoom, setShowZoom] = useState(true)
   const [zoomLevel, setZoomLevel] = useState(6)
@@ -236,6 +237,7 @@ function App() {
         setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
         setReverse(saved.reverse ?? false)
         setStereo(saved.stereo ?? true)
+        setChannelOrder(saved.channelOrder === 'RL' ? 'RL' : 'LR')
         setShowStereoGuides(saved.showStereoGuides ?? true)
         setShowZoom(saved.showZoom ?? true)
         setZoomLevel(saved.zoomLevel ?? 6)
@@ -290,14 +292,14 @@ function App() {
       cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
-      fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
+      fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
-      fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides,
+      fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame])
 
@@ -471,6 +473,7 @@ function App() {
         soundtrackColor,
         reverse,
         stereo,
+        channelOrder,
         showStereoGuides,
         showZoom,
         zoomLevel,
@@ -501,7 +504,7 @@ function App() {
     a.click()
     URL.revokeObjectURL(url)
     setStatus(`Saved settings file: ${filename}`)
-  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
+  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
 
   // Shared by handleImportSettingsFile (settings-only import) and
   // handleLoadProjectFile (.o2d project load) so both apply the same
@@ -529,6 +532,7 @@ function App() {
     setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
     setReverse(Boolean(saved.reverse ?? false))
     setStereo(Boolean(saved.stereo ?? true))
+    setChannelOrder(saved.channelOrder === 'RL' ? 'RL' : 'LR')
     setShowStereoGuides(Boolean(saved.showStereoGuides ?? true))
     setShowZoom(Boolean(saved.showZoom ?? true))
     setZoomLevel(Number(saved.zoomLevel ?? 6))
@@ -801,6 +805,7 @@ function App() {
           fps, sample_rate: sampleRate, bit_depth: bitDepth, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
           soundtrack_color: soundtrackColor,
           stereo,
+          channel_order: channelOrder,
           start_frame: startFrame,
           end_frame: endFrame,
         }),
@@ -909,7 +914,7 @@ function App() {
       setCancelRequested(false)
       setExtractProgress(null)
     }
-  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, startFrame, endFrame, numFrames])
 
   const handleCancelExtract = useCallback(async () => {
     setCancelRequested(true)
@@ -951,6 +956,7 @@ function App() {
           fps, sample_rate: sampleRate, bit_depth: bitDepth, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
           soundtrack_color: soundtrackColor,
           stereo,
+          channel_order: channelOrder,
           start_frame: startFrame,
           end_frame: endFrame,
         }),
@@ -1064,7 +1070,7 @@ function App() {
       setCancelRequested(false)
       setExportVideoProgress(null)
     }
-  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, startFrame, endFrame, numFrames])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, startFrame, endFrame, numFrames])
 
   const handleCancelExportVideo = useCallback(async () => {
     setCancelRequested(true)
@@ -1277,6 +1283,18 @@ function App() {
                 <div className="checkbox-row">
                   <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
                   <label htmlFor="stereo">Stereo (split L/R)</label>
+                </div>
+                <div className="control-row">
+                  <label htmlFor="channel-order">Channel Order</label>
+                  <select
+                    id="channel-order"
+                    value={channelOrder}
+                    onChange={e => setChannelOrder(e.target.value)}
+                    disabled={!stereo}
+                  >
+                    <option value="LR">L, R (default)</option>
+                    <option value="RL">R, L (flipped)</option>
+                  </select>
                 </div>
                 <div className="checkbox-row">
                   <input type="checkbox" id="stereo-guides" checked={showStereoGuides} onChange={e => setShowStereoGuides(e.target.checked)} />

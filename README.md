@@ -16,7 +16,7 @@ Also, another important goal is that anyone can understand how the audio convers
 Currenty archetecture is a React front-end and a python backend, but they can be run in many ways. The python/backend can be used via REST and can be programatically called. Developers or software-minded users can launch the application locally and run it in a browser.
 
 ### Stand-Alone App
-There is work being done to have the python/react packaged as a OS-native application for devices that run the server and front end, and contain ffmpeg, all in one click. The hope is this version is useful for archivisits and others who want the application to "just work". Mac-OS and Windows (x64 and arm64) are currently generated, and Linux should be supported soon, all distributed under Releases. See [Download the app](#download-the-app)
+There is work being done to have the python/react packaged as a OS-native application for devices that run the server and front end, and contain ffmpeg, all in one click. The hope is this version is useful for archivisits and others who want the application to "just work". Mac-OS, Windows (x64 and arm64), and Linux (Debian/Ubuntu `.deb`, amd64 and arm64) are currently generated, all distributed under Releases. See [Download the app](#download-the-app)
 
 ### Kyle's Optical Decoder
 Python CLI tool that can extract film optical audio
@@ -43,6 +43,33 @@ Grab the latest `Optical2Digital-Setup-x64.exe` (or `-arm64.exe` on ARM-based Wi
 **First launch only:** because this build isn't code-signed, Windows SmartScreen will show an "unrecognized publisher" warning. Click **More info**, then **Run anyway** to proceed. After that first launch, it opens normally.
 
 No Python, Node, or ffmpeg install needed — everything required is bundled inside the app.
+
+### Linux (Debian / Ubuntu)
+
+1. Download the latest `.deb` for your CPU from the [Releases page](../../releases):
+   `Optical2Digital-linux-amd64.deb` for a normal PC/laptop, or
+   `Optical2Digital-linux-arm64.deb` for an ARM machine (Raspberry Pi, Ampere, a VM on Apple Silicon).
+
+2. Install it with `apt` (this pulls in the system Qt/WebEngine runtime libraries the bundled UI needs):
+
+   ```bash
+   cd ~/Downloads
+   sudo apt install ./Optical2Digital-linux-amd64.deb
+   ```
+
+   The leading `./` matters — it tells `apt` to install a local file rather than look for a package by that name. Use `apt`, **not** `sudo dpkg -i`: `dpkg` won't install the dependencies (if you already did, run `sudo apt-get install -f` to finish).
+
+   If `apt` prints a `Download is performed unsandboxed as root ... Permission denied` notice, it's harmless — the install still completes. It just means the `.deb` sat in a directory the `_apt` user can't read; installing from `~/Downloads` or `/tmp` avoids it.
+
+3. Launch it from your application menu (**Optical2Digital**) or by running `optical2digital` in a terminal.
+
+No Python, Node, or ffmpeg install needed — everything required is bundled inside the app. It installs to `/opt/Optical2Digital`. Uninstall with:
+
+```bash
+sudo apt remove optical2digital
+```
+
+Both the amd64 and arm64 `.deb`s are built on Ubuntu 24.04 and need **Ubuntu 24.04 / Debian 13 or newer** (or an equivalent-vintage derivative such as Mint 22+, Pop!_OS 24.04+). This baseline is set by the bundled Qt UI toolkit.
 
 ### Developer Setup (normal local)
 
