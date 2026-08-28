@@ -63,19 +63,28 @@ else
   echo "    CMAKE_ARGS=\"-DBUILD_opencv_dnn=OFF\" pip install --no-build-isolation opencv-python" >&2
   exit 1
 fi
-# Fail fast if the GUI stack the frozen app needs isn't in this venv —
-# otherwise PyInstaller happily produces a bundle that dies at startup with
-# "No module named 'qtpy'" / "You must have either QT or GTK ...". Report
-# exactly which piece is missing.
-missing=""
-python -c "import qtpy" 2>/dev/null || missing="$missing qtpy"
-python -c "import PySide6" 2>/dev/null || missing="$missing pyside6"
-python -c "import PySide6.QtWebEngineWidgets" 2>/dev/null \
-  || missing="$missing PySide6-Addons(QtWebEngine)"
-if [[ -n "$missing" ]]; then
-  echo "Error: this venv ($VIRTUAL_ENV) is missing:$missing" >&2
-  echo "    pip install pyside6 qtpy" >&2
-  echo "(the 'pyside6' metapackage pulls PySide6-Addons, which carries QtWebEngine)" >&2
+# Fail fast if the GUI stack the frozen app needs isn't importable in this
+# venv — otherwise PyInstaller happily produces a bundle that dies at startup
+# with "No module named 'qtpy'" / "You must have either QT or GTK ...". The
+# QtWebEngine check is import-time, not just "is the package installed": its
+# .so dlopens system libs (libnss3, libminizip.so.1, ...) that must be
+# present on the *build* box too, and PyInstaller's analysis imports the
+# module. Print the real error so a missing system lib is obvious.
+if ! python - <<'PY'
+import importlib, sys
+for mod in ("qtpy", "PySide6", "PySide6.QtWebEngineWidgets"):
+    try:
+        importlib.import_module(mod)
+    except Exception as e:
+        print(f"  {mod}: {e.__class__.__name__}: {e}", file=sys.stderr)
+        sys.exit(1)
+PY
+then
+  echo "Error: the Qt GUI stack is not importable in this venv ($VIRTUAL_ENV)." >&2
+  echo "  - missing package?  pip install pyside6 qtpy" >&2
+  echo "    (the 'pyside6' metapackage pulls PySide6-Addons, which has QtWebEngine)" >&2
+  echo "  - 'cannot open shared object file' above?  install that system lib" >&2
+  echo "    (QtWebEngine needs e.g. libnss3, libminizip1 on the build box too)." >&2
   exit 1
 fi
 

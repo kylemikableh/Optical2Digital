@@ -255,18 +255,18 @@ jobs:
   # (bundle_ffmpeg_linux.sh, BtbN linux static builds), and the packaging
   # target (packaging/build-linux.sh -> a .deb via dpkg-deb).
   #
-  # runs-on: ubuntu-22.04 (NOT ubuntu-latest). PyInstaller bundles no libc,
-  # so the .deb only runs where glibc >= the build host's. 22.04 (glibc
-  # 2.35) covers 22.04 / 24.04 and current Mint / Pop!_OS / Debian 12.
-  # Building on 24.04 would exclude every 22.04 user. TRADEOFF: GitHub is
-  # winding down the 22.04 hosted image; if it's removed, switch to
-  # `runs-on: ubuntu-latest` + `container: ubuntu:22.04` (and add
-  # nodejs / python3-venv / build-essential to the apt step) to keep the
-  # old glibc floor.
+  # Both arches build on ubuntu-24.04(-arm). Ideally amd64 would build on
+  # 22.04 for a lower glibc floor (PyInstaller bundles no libc, so the .deb
+  # only runs where glibc >= the build host's), but PySide6 6.11's aarch64
+  # wheels are manylinux_2_39 (need glibc 2.39, so arm64 *must* use 24.04),
+  # and on 22.04 the QtWebEngine .so's also failed to import against that
+  # runner's older system libs. Keeping both on 24.04 is consistent and
+  # avoids that whack-a-mole. Net floor: Ubuntu 24.04 / Debian 13+
+  # (documented in README.md).
   build-linux:
     name: Build Linux (.deb, amd64)
     needs: version
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # needed to create the release and upload the .deb
     steps:
@@ -349,10 +349,13 @@ jobs:
     needs: version
     # GitHub-hosted arm64 Linux runner (free for public repos). VERIFY at
     # implementation/rollout time: availability, quota, and enrollment
-    # requirements for this runner label may differ from ubuntu-22.04 and
-    # are worth reconfirming before relying on this for a real release —
-    # same caveat as the build-windows-arm64 job.
-    runs-on: ubuntu-22.04-arm
+    # requirements for this runner label are worth reconfirming before
+    # relying on this for a real release — same caveat as build-windows-arm64.
+    #
+    # 24.04 is mandatory here (not just chosen for consistency with the
+    # amd64 job): PySide6 6.11's aarch64 wheels are manylinux_2_39, so
+    # 22.04-arm's glibc 2.35 can't install them at all.
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
     steps:
@@ -382,8 +385,9 @@ jobs:
             libxkbcommon-x11-0 libxext6 libxrender1 libxtst6 libdrm2 libgbm1 \
             libcups2 libminizip1 libasound2
 
-      # pyside6 has manylinux_aarch64 wheels, so this is identical to the
-      # amd64 job (see its comment).
+      # Same as the amd64 job. The one arm64-specific fact — PySide6's
+      # aarch64 wheels need glibc 2.39 — is handled by running on 24.04-arm
+      # (see the runs-on comment above), not here.
       - name: Create Python virtualenv
         run: |
           python3 -m venv .venv

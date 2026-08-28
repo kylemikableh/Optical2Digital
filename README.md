@@ -69,7 +69,7 @@ No Python, Node, or ffmpeg install needed — everything required is bundled ins
 sudo apt remove optical2digital
 ```
 
-The `.deb` is built on Ubuntu 22.04, so it runs on Ubuntu 22.04 / 24.04 (and newer) plus current derivatives such as Mint, Pop!_OS, and Debian 12+.
+Both the amd64 and arm64 `.deb`s are built on Ubuntu 24.04 and need **Ubuntu 24.04 / Debian 13 or newer** (or an equivalent-vintage derivative such as Mint 22+, Pop!_OS 24.04+). This baseline is set by the bundled Qt UI toolkit.
 
 ### Developer Setup (normal local)
 
