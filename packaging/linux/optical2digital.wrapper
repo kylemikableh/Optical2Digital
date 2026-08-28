@@ -1,0 +1,8 @@
+#!/bin/sh
+# Installed as /usr/bin/optical2digital by the .deb — a thin launcher on PATH
+# for the PyInstaller onedir bundle under /opt. packaging/launcher.py already
+# sets QTWEBENGINE_DISABLE_SANDBOX itself; it's repeated here so launching the
+# binary any other way (e.g. straight from the .desktop file) is covered too.
+# See packaging/build-linux.sh for why the sandbox is disabled.
+export QTWEBENGINE_DISABLE_SANDBOX=1
+exec /opt/Optical2Digital/Optical2Digital "$@"

@@ -1,0 +1,21 @@
+Optical2Digital
+Upstream: https://github.com/kylemikableh/Optical2Digital
+
+Copyright 2026 Kyle Mikolajczyk
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+On Debian systems the full text of the GNU General Public License version 3
+can be found in /usr/share/common-licenses/GPL-3. The project's own copy is
+distributed as LICENSE in the source repository above.
+
+This package bundles a statically-linked ffmpeg build from
+https://github.com/BtbN/FFmpeg-Builds (GPL configuration) and the Qt / PySide6
+runtime (LGPL v3, https://www.qt.io/licensing).

@@ -48,6 +48,31 @@ def test_uses_bundled_binary_when_frozen_and_present():
             del sys._MEIPASS
 
 
+def test_uses_bundled_binary_when_frozen_on_linux():
+    # Linux uses the same bare "ffmpeg" name as macOS (only win32 appends
+    # ".exe" — see server._resolve_ffmpeg_path and the FFMPEG_BIN_NAME line
+    # in packaging/optical2digital.spec, which must agree). sys.platform is
+    # pinned to "linux" for the same determinism reason as the darwin test
+    # above.
+    with tempfile.TemporaryDirectory() as tmp:
+        bundled = os.path.join(tmp, "ffmpeg")
+        with open(bundled, "w") as f:
+            f.write("#!/bin/sh\necho fake\n")
+        os.chmod(bundled, 0o755)
+
+        sys.frozen = True
+        sys._MEIPASS = tmp
+        real_platform = sys.platform
+        sys.platform = "linux"
+        try:
+            result = server._resolve_ffmpeg_path()
+            assert result == bundled, f"expected bundled path {bundled!r}, got {result!r}"
+        finally:
+            sys.platform = real_platform
+            del sys.frozen
+            del sys._MEIPASS
+
+
 def test_frozen_but_missing_bundled_binary_falls_back_to_path():
     with tempfile.TemporaryDirectory() as tmp:
         # no ffmpeg file created in tmp — simulates a broken/incomplete bundle
@@ -122,6 +147,7 @@ def test_uses_ffmpeg_exe_when_frozen_on_windows():
 if __name__ == "__main__":
     test_falls_back_to_path_when_not_frozen()
     test_uses_bundled_binary_when_frozen_and_present()
+    test_uses_bundled_binary_when_frozen_on_linux()
     test_frozen_but_missing_bundled_binary_falls_back_to_path()
     test_frozen_and_present_but_not_executable_falls_back_to_path()
     test_uses_ffmpeg_exe_when_frozen_on_windows()

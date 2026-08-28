@@ -1,0 +1,21 @@
+Package: optical2digital
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Kyle Mikolajczyk <kyle@kylem.org>
+Installed-Size: @INSTALLED_SIZE@
+Section: sound
+Priority: optional
+Homepage: https://github.com/kylemikableh/Optical2Digital
+Depends: libc6, libstdc++6, libgl1, libglib2.0-0, libnss3, libnspr4,
+ libfontconfig1, libfreetype6, libdbus-1-3, libexpat1, libx11-6, libx11-xcb1,
+ libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1,
+ libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-xinerama0,
+ libxcb-xkb1, libxcomposite1, libxdamage1, libxfixes3, libxrandr2,
+ libxkbcommon0, libxkbcommon-x11-0, libxext6, libxrender1, libxtst6, libdrm2,
+ libgbm1, libcups2, libminizip1 | libminizip1t64, libasound2 | libasound2t64
+Description: Optical film audio to digital PCM converter
+ Extracts and converts variable-area / variable-density optical soundtracks
+ from motion-picture film scans (image sequences or video) into digital PCM
+ audio, through a native desktop UI. The application bundles its own Python
+ runtime, web frontend, and a static ffmpeg, so nothing else needs to be
+ installed for it to run.

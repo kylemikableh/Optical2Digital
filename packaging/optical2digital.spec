@@ -1,5 +1,6 @@
 # Build with (from repo root): pyinstaller packaging/optical2digital.spec
-# Full pipeline: packaging/build-macos.sh (macOS) or packaging/build-windows.ps1 (Windows)
+# Full pipeline: packaging/build-macos.sh (macOS), packaging/build-windows.ps1
+# (Windows), or packaging/build-linux.sh (Linux)
 #
 # Shared across platforms: this spec branches on sys.platform rather than
 # forking into a separate per-platform file. sys.platform here reflects the
@@ -20,6 +21,7 @@ import sys
 ROOT_DIR = pathlib.Path(SPECPATH).resolve().parent
 FFMPEG_BUNDLE_DIR = ROOT_DIR / "packaging" / "build" / "ffmpeg-bundle"
 IS_MACOS = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
 
 # APP_VERSION is set by packaging/build-macos.sh / build-windows.ps1 (which
 # in turn derive it from the release git tag — see
@@ -31,8 +33,23 @@ IS_MACOS = sys.platform == "darwin"
 APP_VERSION = os.environ.get("APP_VERSION", "0.0.0-dev")
 (ROOT_DIR / "app_version.py").write_text(f'APP_VERSION = "{APP_VERSION}"\n', encoding="utf-8")
 
-FFMPEG_BIN_NAME = "ffmpeg" if IS_MACOS else "ffmpeg.exe"
-ICON_PATH = str(ROOT_DIR / "packaging" / ("icon.icns" if IS_MACOS else "icon.ico"))
+# Only Windows uses the .exe suffix — macOS and Linux both ship a plain
+# `ffmpeg`. This must stay in lockstep with server._resolve_ffmpeg_path(),
+# which looks for the bundled binary by the same name.
+FFMPEG_BIN_NAME = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+
+# PyInstaller only embeds an icon into PE (Windows) and Mach-O (macOS)
+# executables — there's no equivalent for a Linux ELF, and passing a path to
+# a file that doesn't exist on the build host (there's no icon.ico/.icns on
+# Linux) makes PyInstaller error out. The Linux app icon is instead supplied
+# by the .desktop file + hicolor PNGs installed by the .deb (see
+# packaging/build-linux.sh).
+if IS_MACOS:
+    ICON_PATH = str(ROOT_DIR / "packaging" / "icon.icns")
+elif IS_LINUX:
+    ICON_PATH = None
+else:
+    ICON_PATH = str(ROOT_DIR / "packaging" / "icon.ico")
 
 # The ffmpeg binary (+ libs/ on macOS, dylibbundler's output — see Task 2)
 # is passed via `datas`, not `binaries`. This does NOT shield it from
@@ -52,6 +69,29 @@ datas = [
     (str(ROOT_DIR / 'frontend' / 'dist'), 'frontend/dist'),
     (str(FFMPEG_BUNDLE_DIR / FFMPEG_BIN_NAME), '.'),
 ]
+# pywebview has no default GUI backend on Linux the way it does on macOS
+# (Cocoa) and Windows (EdgeWebView2) — packaging/build-linux.sh installs
+# PySide6 into the build venv and packaging/launcher.py sets
+# PYWEBVIEW_GUI=qt, so the Qt backend has to be pulled in explicitly:
+# PyInstaller's static analysis can't follow pywebview's runtime backend
+# selection, nor qtpy's dynamic re-export of the PySide6.* modules. Naming
+# the concrete PySide6 QtWebEngine modules here is what triggers
+# PyInstaller's dedicated hook-PySide6.QtWebEngineWidgets hook, which bundles
+# the QtWebEngineProcess helper, *.pak resources, icudtl.dat and
+# qtwebengine_locales/ — without them the window opens but never renders.
+# (collect_all('PySide6') would also work but drags in every Qt module.)
+binaries = []
+hiddenimports = ['KylesOpticalDecoder']
+if IS_LINUX:
+    hiddenimports += [
+        'webview.platforms.qt',
+        'qtpy',
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebChannel',
+        'PySide6.QtPrintSupport',
+    ]
+
 if IS_MACOS:
     datas.append((str(FFMPEG_BUNDLE_DIR / 'libs'), 'libs'))
     # DATA-typed entries land under Contents/Resources in the final .app
@@ -68,9 +108,9 @@ a = Analysis(
     # 'packaging/launcher.py'.
     ['launcher.py'],
     pathex=[str(ROOT_DIR)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=['KylesOpticalDecoder'],
+    hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
@@ -102,9 +142,10 @@ coll = COLLECT(
 )
 
 # BUNDLE() produces a macOS .app and is unsupported/meaningless on other
-# platforms — on Windows (and Linux, if that's added later), the onedir
-# folder at packaging/dist/Optical2Digital/ from COLLECT above *is* the
-# final build output, wrapped by build-windows.ps1 into a zip + installer.
+# platforms — on Windows and Linux the onedir folder at
+# packaging/dist/Optical2Digital/ from COLLECT above *is* the final build
+# output, wrapped by build-windows.ps1 into a zip + installer, and by
+# build-linux.sh into a .deb.
 if IS_MACOS:
     app = BUNDLE(
         coll,

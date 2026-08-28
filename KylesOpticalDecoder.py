@@ -728,11 +728,16 @@ def extract_audio(source, top, bottom, left, right,
                   dmin_headroom=0.2, binary_mask=False,
                   binary_lb=96, binary_ub=255, dmin_value=None,
                   integrate=False, bit_depth="int16", cancel_event=None,
-                  progress_every=20):
+                  progress_every=20, channel_order="LR"):
     """Run the full extraction pipeline. Returns (sample_rate, sample_array).
 
     *source* is a FrameSource object (ImageSequenceSource or VideoSource).
     When *stereo* is True, returns a 2-channel array (N, 2).
+    *channel_order* controls which physical half of the split soundtrack
+    maps to which output channel: "LR" (default) keeps the image's inner
+    half as the left channel and the outer half as the right; "RL" swaps
+    them, for scans whose track runs right-to-left. Ignored when *stereo*
+    is False.
     *bit_depth* selects the output sample format — one of "int16" (default),
     "int24", "int32", or "float32"; see _quantize_audio().
     *cancel_event*, if provided, is a threading.Event checked periodically
@@ -894,7 +899,13 @@ def extract_audio(source, top, bottom, left, right,
     left_samples = _process_channel(all_left, "audio" if not stereo else "left channel", offsets)
     if stereo:
         right_samples = _process_channel(all_right, "right channel", offsets)
-        signal_out = np.column_stack([left_samples, right_samples])
+        # channel_order == "RL" flips the track's left-to-right orientation:
+        # the inner-half samples ("left_samples") are written as the output's
+        # right channel and vice versa.
+        if channel_order == "RL":
+            signal_out = np.column_stack([right_samples, left_samples])
+        else:
+            signal_out = np.column_stack([left_samples, right_samples])
     else:
         signal_out = left_samples
 
