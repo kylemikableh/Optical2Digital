@@ -300,7 +300,7 @@ jobs:
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
             libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxkbcommon0 \
             libxkbcommon-x11-0 libxext6 libxrender1 libxtst6 libdrm2 libgbm1 \
-            libcups2 libminizip1 libasound2
+            libcups2t64 libminizip1 libasound2t64
 
       # Mirrors the build-macos job's venv step (see its comment for the
       # opencv-python --no-build-isolation / CMAKE_ARGS reasoning — a no-op
@@ -383,7 +383,7 @@ jobs:
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
             libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxkbcommon0 \
             libxkbcommon-x11-0 libxext6 libxrender1 libxtst6 libdrm2 libgbm1 \
-            libcups2 libminizip1 libasound2
+            libcups2t64 libminizip1 libasound2t64
 
       # Same as the amd64 job. The one arm64-specific fact — PySide6's
       # aarch64 wheels need glibc 2.39 — is handled by running on 24.04-arm

@@ -12,7 +12,8 @@ Depends: libc6, libstdc++6, libgl1, libglib2.0-0, libnss3, libnspr4,
  libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-xinerama0,
  libxcb-xkb1, libxcomposite1, libxdamage1, libxfixes3, libxrandr2,
  libxkbcommon0, libxkbcommon-x11-0, libxext6, libxrender1, libxtst6, libdrm2,
- libgbm1, libcups2, libminizip1 | libminizip1t64, libasound2 | libasound2t64
+ libgbm1, libcups2t64 | libcups2, libminizip1 | libminizip1t64,
+ libasound2t64 | libasound2
 Description: Optical film audio to digital PCM converter
  Extracts and converts variable-area / variable-density optical soundtracks
  from motion-picture film scans (image sequences or video) into digital PCM
