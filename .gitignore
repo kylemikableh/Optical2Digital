@@ -2,6 +2,9 @@ venv/
 .venv/
 input/
 .vscode/
+.claude/
+.pytest_cache/
+examples/
 output/
 *.wav
 debug_crops/
@@ -17,3 +20,5 @@ packaging/dist/
 packaging/icon.icns
 packaging/icon.ico
 app_version.py
+CLAUDE.md
+*.DS_Store

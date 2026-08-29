@@ -1,1 +1,0 @@
-IMPORTANT: Always, place changes into the current branch but do NOT commit any changes. Never use a worktree, always do changes in-place but NEVER commit or push without explicit, case-by-case basis from the user. 
