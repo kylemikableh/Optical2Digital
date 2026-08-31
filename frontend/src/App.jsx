@@ -68,6 +68,56 @@ function useDebouncedImageUrl(url, delay = 150) {
   return src
 }
 
+/** Same debounce/abort behavior as useDebouncedImageUrl but for a JSON
+ *  endpoint — returns [data, error], surfacing the server's error detail
+ *  (e.g. "Overlap must be greater than 0...") so callers can render an
+ *  explanatory empty state instead of failing silently. */
+function useDebouncedJson(url, delay = 150) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const abortRef = useRef(null)
+
+  useEffect(() => {
+    if (!url) {
+      if (abortRef.current) abortRef.current.abort()
+      setData(null)
+      setError(null)
+      return
+    }
+
+    const timer = setTimeout(() => {
+      if (abortRef.current) abortRef.current.abort()
+      const ac = new AbortController()
+      abortRef.current = ac
+
+      fetch(url, { signal: ac.signal })
+        .then(async r => {
+          const body = await r.json()
+          if (!r.ok) throw new Error(body.detail || 'Request failed')
+          return body
+        })
+        .then(body => {
+          if (ac.signal.aborted) return
+          setData(body)
+          setError(null)
+        })
+        .catch(e => {
+          if (e.name === 'AbortError' || ac.signal.aborted) return
+          setData(null)
+          setError(e.message)
+        })
+    }, delay)
+
+    return () => clearTimeout(timer)
+  }, [url, delay])
+
+  useEffect(() => () => {
+    if (abortRef.current) abortRef.current.abort()
+  }, [])
+
+  return [data, error]
+}
+
 function saveSettings(path, settings) {
   try { localStorage.setItem(SETTINGS_PREFIX + path, JSON.stringify(settings)) } catch {}
 }
@@ -160,6 +210,7 @@ function App() {
   const [zoomLevel, setZoomLevel] = useState(6)
   const [startFrame, setStartFrame] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
+  const [showOverlapPreview, setShowOverlapPreview] = useState(false)
 
   // Crop overlay interaction
   const imgRef = useRef(null)
@@ -243,6 +294,7 @@ function App() {
         setZoomLevel(saved.zoomLevel ?? 6)
         setStartFrame(saved.startFrame ?? 0)
         setEndFrame(saved.endFrame ?? data.num_frames - 1)
+        setShowOverlapPreview(saved.showOverlapPreview ?? false)
       } else {
         if (data.fps != null) setFps(data.fps)
         setStartFrame(0)
@@ -295,13 +347,15 @@ function App() {
       fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame,
+      showOverlapPreview,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
       fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
       showZoom, zoomLevel,
-      startFrame, endFrame])
+      startFrame, endFrame,
+      showOverlapPreview])
 
   useEffect(() => {
     setDminPickPoint(null)
@@ -444,6 +498,40 @@ function App() {
     }
   }
 
+  // --- Overlap/splice preview (bottom of current frame spliced against the
+  // top of the next frame, plus a waveform of the same join) ---
+  const overlapPreviewParams = (showOverlapPreview && loaded) ? (() => {
+    const imgCrop = screenToImageCrop(cropTop, cropBottom, cropLeft, cropRight)
+    return new URLSearchParams({
+      top: imgCrop.top, bottom: imgCrop.bottom, left: imgCrop.left, right: imgCrop.right,
+      rotate, negative,
+      soundtrack_color: soundtrackColor,
+      dmin_value: dminValue,
+      dmin_headroom: dminHeadroom,
+      binary_mask: binaryMask,
+      binary_lb: binaryLb,
+      binary_ub: binaryUb,
+      integrate,
+      overlap, audio_offset: audioOffset,
+    })
+  })() : null
+
+  const overlapSpliceImageUrl = overlapPreviewParams
+    ? `${API}/api/frame/${frameIndex}/overlap-splice-image?${overlapPreviewParams.toString()}`
+    : null
+
+  const overlapWaveformUrl = overlapPreviewParams
+    ? (() => {
+        const p = new URLSearchParams(overlapPreviewParams)
+        p.set('stereo', stereo)
+        p.set('channel_order', channelOrder)
+        return `${API}/api/frame/${frameIndex}/overlap-waveform?${p.toString()}`
+      })()
+    : null
+
+  const overlapSpliceSrc = useDebouncedImageUrl(overlapSpliceImageUrl)
+  const [overlapWaveform, overlapWaveformError] = useDebouncedJson(overlapWaveformUrl)
+
   const handleExportSettings = useCallback(async () => {
     const payload = {
       app: 'Optical2Digital',
@@ -479,6 +567,7 @@ function App() {
         zoomLevel,
         startFrame,
         endFrame,
+        showOverlapPreview,
       },
     }
 
@@ -504,7 +593,7 @@ function App() {
     a.click()
     URL.revokeObjectURL(url)
     setStatus(`Saved settings file: ${filename}`)
-  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame])
+  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame, showOverlapPreview])
 
   // Shared by handleImportSettingsFile (settings-only import) and
   // handleLoadProjectFile (.o2d project load) so both apply the same
@@ -538,6 +627,7 @@ function App() {
     setZoomLevel(Number(saved.zoomLevel ?? 6))
     setStartFrame(Math.max(0, Math.min(Number(saved.startFrame ?? 0), maxFrame)))
     setEndFrame(Math.max(0, Math.min(Number(saved.endFrame ?? maxFrame), maxFrame)))
+    setShowOverlapPreview(Boolean(saved.showOverlapPreview ?? false))
   }, [])
 
   // Parses+applies settings JSON text regardless of where it came from (web
@@ -1616,6 +1706,73 @@ function App() {
                 onChange={e => setFrameIndex(Number(e.target.value))}
                 style={{ width: 200 }}
               />
+              <button
+                className="btn-secondary btn-small"
+                aria-pressed={showOverlapPreview}
+                title="Preview the audio splice between this frame and the next"
+                onClick={() => setShowOverlapPreview(v => !v)}
+              >
+                {showOverlapPreview ? 'Hide' : 'Show'} Splice Preview
+              </button>
+            </div>
+          )}
+          {showOverlapPreview && loaded && (
+            <div className="overlap-preview-panel">
+              <div className="overlap-preview-header">
+                <span>
+                  Splice Preview — Frame {frameIndex + 1} → {frameIndex + 2}
+                  {overlapWaveform && overlapWaveform.offset > 0 &&
+                    ` — overlap ${overlapWaveform.offset} of ${overlapWaveform.max_overlap} rows searched`}
+                </span>
+              </div>
+              {overlapWaveformError ? (
+                <p className="overlap-preview-empty">{overlapWaveformError}</p>
+              ) : (
+                <>
+                  <div className="overlap-splice-image-wrap">
+                    {overlapSpliceSrc
+                      ? <img src={overlapSpliceSrc} alt="Splice between current and next frame" className="overlap-splice-image" />
+                      : <p className="overlap-preview-empty">Loading splice preview…</p>}
+                    <div className="overlap-splice-join-line" />
+                    {overlapWaveform && overlapWaveform.offset > 0 && (
+                      <div
+                        className="overlap-splice-marker"
+                        style={{
+                          top: `${((overlapWaveform.max_overlap - overlapWaveform.offset) / (overlapWaveform.max_overlap * 2)) * 100}%`,
+                          height: `${(overlapWaveform.offset / overlapWaveform.max_overlap) * 100}%`,
+                        }}
+                        title={`Selected overlap: ${overlapWaveform.offset} rows`}
+                      />
+                    )}
+                  </div>
+                  {overlapWaveform && (
+                    <div className="overlap-waveform-charts">
+                      <div className="overlap-waveform-legend">
+                        <span className="legend-swatch legend-prev" />Current frame (tail)
+                        <span className="legend-swatch legend-next" />Next frame (head)
+                        <span className="legend-swatch legend-stitched" />Stitched output
+                      </div>
+                      {overlapWaveform.stereo ? (
+                        <>
+                          <OverlapWaveformChart
+                            label="Left channel" data={overlapWaveform.channels.left}
+                            offset={overlapWaveform.offset} maxOverlap={overlapWaveform.max_overlap}
+                          />
+                          <OverlapWaveformChart
+                            label="Right channel" data={overlapWaveform.channels.right}
+                            offset={overlapWaveform.offset} maxOverlap={overlapWaveform.max_overlap}
+                          />
+                        </>
+                      ) : (
+                        <OverlapWaveformChart
+                          label="Mono" data={overlapWaveform.channels.mono}
+                          offset={overlapWaveform.offset} maxOverlap={overlapWaveform.max_overlap}
+                        />
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -1626,6 +1783,46 @@ function App() {
         <span>{status}</span>
         <a href="https://optical2digital.org" target="_blank" rel="noopener noreferrer">optical2digital.org</a>
       </div>
+    </div>
+  )
+}
+
+/** Plots the overlap join between two frames' audio as three overlaid
+ *  polylines — the current frame's tail, the next frame's head, and the
+ *  actual cross-faded stitched output — so a bad splice (the prev/next
+ *  lines diverging inside the shaded overlap band) is visible at a glance. */
+function OverlapWaveformChart({ label, data, offset, maxOverlap }) {
+  if (!data || maxOverlap <= 0) return null
+
+  const width = 400
+  const height = 90
+  const pad = 4
+  const n = maxOverlap * 2
+  const xFor = i => pad + (i / Math.max(n, 1)) * (width - pad * 2)
+  const yFor = v => pad + (1 - Math.min(Math.max(v, 0), 1)) * (height - pad * 2)
+  const pointsFor = (arr, xOffset) => arr.map((v, i) => `${xFor(i + xOffset)},${yFor(v)}`).join(' ')
+
+  const prevPoints = pointsFor(data.context_prev, 0)
+  const nextPoints = pointsFor(data.context_next, maxOverlap)
+  const stitchedPoints = pointsFor(data.stitched, 0)
+  const joinX = xFor(maxOverlap)
+  const bandX1 = xFor(maxOverlap - offset)
+  const bandX2 = xFor(maxOverlap + offset)
+
+  return (
+    <div className="overlap-waveform-chart">
+      <div className="overlap-waveform-chart-label">
+        {label} — alignment error {data.error.toFixed(4)}
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="overlap-waveform-svg">
+        {offset > 0 && (
+          <rect x={bandX1} y={0} width={bandX2 - bandX1} height={height} className="overlap-waveform-band" />
+        )}
+        <line x1={joinX} y1={0} x2={joinX} y2={height} className="overlap-waveform-join" />
+        <polyline points={prevPoints} className="overlap-waveform-line overlap-waveform-line-prev" />
+        <polyline points={nextPoints} className="overlap-waveform-line overlap-waveform-line-next" />
+        <polyline points={stitchedPoints} className="overlap-waveform-line overlap-waveform-line-stitched" />
+      </svg>
     </div>
   )
 }

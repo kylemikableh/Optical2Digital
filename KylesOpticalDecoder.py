@@ -375,6 +375,167 @@ def apply_overlap_offsets(frame_audio_list, offsets):
 
 
 # ---------------------------------------------------------------------------
+# Overlap/splice preview (for UI)
+# ---------------------------------------------------------------------------
+
+def _load_overlap_frame_pair(source, index, audio_offset, top, bottom, left, right,
+                              rotate=0, negative=False, soundtrack_color="B&W",
+                              dmin_percentile=99.5, dmin_headroom=0.2,
+                              binary_mask=False, binary_lb=96, binary_ub=255,
+                              dmin_value=None, integrate=False):
+    """Load and correct the two source frames whose audio would be joined at
+    picture-frame *index* -> *index* + 1.
+
+    Picture-frame audio is optically printed *audio_offset* frames earlier
+    than the picture itself (see extract_audio()'s `idx - audio_offset`
+    seek), so the actual source frames read here are index - audio_offset
+    and index + 1 - audio_offset, not index and index + 1.
+
+    Returns (corrected_a, corrected_b, prev_audio_idx, next_audio_idx).
+    Raises ValueError if either source frame is out of range or unreadable.
+    """
+    prev_audio_idx = index - audio_offset
+    next_audio_idx = index + 1 - audio_offset
+
+    if prev_audio_idx < 0 or prev_audio_idx >= source.num_frames:
+        raise ValueError(
+            f"Audio source frame {prev_audio_idx} (for picture frame {index}) "
+            f"is out of range (0-{source.num_frames - 1})"
+        )
+    if next_audio_idx < 0 or next_audio_idx >= source.num_frames:
+        raise ValueError(
+            f"Audio source frame {next_audio_idx} (for picture frame {index + 1}) "
+            f"is out of range (0-{source.num_frames - 1})"
+        )
+
+    img_a = source.load_frame(prev_audio_idx)
+    img_b = source.load_frame(next_audio_idx)
+    if img_a is None or img_b is None:
+        raise ValueError("Could not read one or both frames for the splice preview")
+
+    kwargs = dict(
+        rotate=rotate, negative=negative, soundtrack_color=soundtrack_color,
+        dmin_percentile=dmin_percentile, dmin_headroom=dmin_headroom,
+        binary_mask=binary_mask, binary_lb=binary_lb, binary_ub=binary_ub,
+        dmin_value=dmin_value, integrate=integrate,
+    )
+    corrected_a = crop_and_correct(img_a, top, bottom, left, right, **kwargs)
+    corrected_b = crop_and_correct(img_b, top, bottom, left, right, **kwargs)
+    return corrected_a, corrected_b, prev_audio_idx, next_audio_idx
+
+
+def build_overlap_splice_image(corrected_a, corrected_b, overlap_frac):
+    """Stack the bottom of frame A's crop against the top of frame B's crop.
+
+    Returns a [0,1] float image (same width as the crops) spanning the
+    overlap search window, for visual inspection of how the two frames'
+    soundtrack pixels line up at the join.
+    """
+    if overlap_frac <= 0:
+        raise ValueError("Overlap must be greater than 0 to preview the splice")
+
+    frame_len = corrected_a.shape[0]
+    max_overlap = int(frame_len * overlap_frac)
+    max_overlap = min(max_overlap, corrected_a.shape[0], corrected_b.shape[0])
+    if max_overlap <= 0:
+        raise ValueError("Overlap window is too small to preview the splice")
+
+    return np.concatenate([corrected_a[-max_overlap:], corrected_b[:max_overlap]], axis=0)
+
+
+def _find_best_overlap_with_error(prev_samples, curr_samples, max_overlap):
+    """Same search as find_best_overlap(), but also returns the winning
+    mean-absolute-difference score so callers can report alignment quality."""
+    search_range = min(max_overlap, len(prev_samples) // 2, len(curr_samples) // 2)
+    if search_range < 2:
+        return 0, 0.0
+
+    best_offset = 0
+    best_error = float("inf")
+
+    for offset in range(1, search_range):
+        error = np.mean(np.abs(prev_samples[-offset:] - curr_samples[:offset]))
+        if error < best_error:
+            best_error = error
+            best_offset = offset
+
+    return best_offset, float(best_error)
+
+
+def compute_overlap_waveform(corrected_a, corrected_b, overlap_frac, stereo=False,
+                              channel_order="LR"):
+    """Compute the overlap alignment + preview waveform data between two
+    corrected frame crops, for UI display.
+
+    Mirrors the real stitching math in stitch_with_overlap(): finds the
+    offset that best aligns the tail of A with the head of B (using the
+    mono mix when *stereo*, exactly like extract_audio() does so channels
+    stay sample-synced), then builds the same cross-faded join preview.
+
+    Returns a dict:
+        {offset, max_overlap, stereo,
+         channels: {<name>: {context_prev, context_next, stitched, error}}}
+    channels is {"mono": ...} when not stereo, else {"left": ..., "right": ...}.
+    Raises ValueError if overlap_frac <= 0 or the overlap window is empty.
+    """
+    if overlap_frac <= 0:
+        raise ValueError("Overlap must be greater than 0 to preview the splice")
+
+    if stereo:
+        left_a, right_a = extract_stereo_scanline_audio(corrected_a)
+        left_b, right_b = extract_stereo_scanline_audio(corrected_b)
+        if channel_order == "RL":
+            left_a, right_a = right_a, left_a
+            left_b, right_b = right_b, left_b
+        mono_a = (left_a + right_a) / 2.0
+        mono_b = (left_b + right_b) / 2.0
+        channel_samples = {"left": (left_a, left_b), "right": (right_a, right_b)}
+        align_a, align_b = mono_a, mono_b
+    else:
+        mono_a = extract_scanline_audio(corrected_a)
+        mono_b = extract_scanline_audio(corrected_b)
+        channel_samples = {"mono": (mono_a, mono_b)}
+        align_a, align_b = mono_a, mono_b
+
+    frame_len = len(align_a)
+    max_overlap = int(frame_len * overlap_frac)
+    max_overlap = max(0, min(max_overlap, len(align_a) // 2, len(align_b) // 2))
+    if max_overlap <= 0:
+        raise ValueError("Overlap window is too small to preview the splice")
+
+    offset, _ = _find_best_overlap_with_error(align_a, align_b, max_overlap)
+
+    channels = {}
+    for name, (samples_a, samples_b) in channel_samples.items():
+        context_prev = samples_a[-max_overlap:]
+        context_next = samples_b[:max_overlap]
+
+        if offset > 0:
+            fade_out = np.linspace(1.0, 0.0, offset)
+            fade_in = np.linspace(0.0, 1.0, offset)
+            blended = context_prev[-offset:] * fade_out + context_next[:offset] * fade_in
+            stitched = np.concatenate([context_prev[:-offset], blended, context_next[offset:]])
+            chan_error = float(np.mean(np.abs(context_prev[-offset:] - context_next[:offset])))
+        else:
+            stitched = np.concatenate([context_prev, context_next])
+            chan_error = 0.0
+
+        channels[name] = {
+            "context_prev": context_prev.tolist(),
+            "context_next": context_next.tolist(),
+            "stitched": stitched.tolist(),
+            "error": chan_error,
+        }
+
+    return {
+        "offset": int(offset),
+        "max_overlap": int(max_overlap),
+        "stereo": bool(stereo),
+        "channels": channels,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Filtering
 # ---------------------------------------------------------------------------
 

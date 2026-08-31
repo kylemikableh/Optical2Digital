@@ -275,6 +275,113 @@ h1, h2, h3 { font-weight: 600; }
 
 .frame-nav span { font-size: 13px; color: var(--text-muted); min-width: 120px; text-align: center; }
 
+.overlap-preview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 20px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.overlap-preview-header {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.overlap-preview-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 10px 0;
+}
+
+.overlap-splice-image-wrap {
+  position: relative;
+  min-height: 140px;
+  max-height: 220px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #000;
+}
+
+.overlap-splice-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  image-rendering: pixelated;
+}
+
+.overlap-splice-join-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+}
+
+.overlap-splice-marker {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: rgba(233, 69, 96, 0.22);
+  border-top: 1px dashed var(--accent);
+  border-bottom: 1px dashed var(--accent);
+  pointer-events: none;
+}
+
+.overlap-waveform-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.overlap-waveform-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  margin-left: 10px;
+}
+.legend-swatch:first-child { margin-left: 0; }
+.legend-prev { background: #6fb1ff; }
+.legend-next { background: #ffb86f; }
+.legend-stitched { background: var(--accent); }
+
+.overlap-waveform-chart { display: flex; flex-direction: column; gap: 4px; }
+
+.overlap-waveform-chart-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.overlap-waveform-svg {
+  width: 100%;
+  height: 90px;
+  background: #0a0a16;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.overlap-waveform-band { fill: rgba(233, 69, 96, 0.15); }
+.overlap-waveform-join { stroke: rgba(255, 255, 255, 0.35); stroke-width: 1; }
+
+.overlap-waveform-line { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.overlap-waveform-line-prev { stroke: #6fb1ff; }
+.overlap-waveform-line-next { stroke: #ffb86f; }
+.overlap-waveform-line-stitched { stroke: var(--accent); stroke-dasharray: 4 3; }
+
 .control-group { display: flex; flex-direction: column; gap: 6px; }
 
 .control-row {

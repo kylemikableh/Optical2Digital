@@ -266,6 +266,89 @@ def estimate_dmin(
     }
 
 
+@app.get("/api/frame/{index}/overlap-splice-image")
+def get_overlap_splice_image(
+    index: int,
+    top: int = Query(0),
+    bottom: int = Query(0),
+    left: int = Query(0),
+    right: int = Query(0),
+    rotate: int = Query(0),
+    negative: bool = Query(False),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    dmin_percentile: float = Query(99.5),
+    dmin_value: float | None = Query(None),
+    dmin_headroom: float = Query(0.2),
+    binary_mask: bool = Query(False),
+    binary_lb: int = Query(96),
+    binary_ub: int = Query(255),
+    integrate: bool = Query(True),
+    overlap: float = Query(0.05),
+    audio_offset: int = Query(21),
+):
+    """Return a JPEG of the bottom of the current audio frame's crop stacked
+    against the top of the next audio frame's crop, spanning the overlap
+    search window, for visual inspection of the splice."""
+    _check_loaded()
+    source = _state["source"]
+    try:
+        corrected_a, corrected_b, _, _ = decoder._load_overlap_frame_pair(
+            source, index, audio_offset, top, bottom, left, right,
+            rotate=rotate, negative=negative, soundtrack_color=soundtrack_color,
+            dmin_percentile=dmin_percentile, dmin_headroom=dmin_headroom,
+            binary_mask=binary_mask, binary_lb=binary_lb, binary_ub=binary_ub,
+            dmin_value=dmin_value, integrate=integrate,
+        )
+        splice_img = decoder.build_overlap_splice_image(corrected_a, corrected_b, overlap)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return Response(content=decoder.corrected_to_jpeg(splice_img), media_type="image/jpeg")
+
+
+@app.get("/api/frame/{index}/overlap-waveform")
+def get_overlap_waveform(
+    index: int,
+    top: int = Query(0),
+    bottom: int = Query(0),
+    left: int = Query(0),
+    right: int = Query(0),
+    rotate: int = Query(0),
+    negative: bool = Query(False),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    dmin_percentile: float = Query(99.5),
+    dmin_value: float | None = Query(None),
+    dmin_headroom: float = Query(0.2),
+    binary_mask: bool = Query(False),
+    binary_lb: int = Query(96),
+    binary_ub: int = Query(255),
+    integrate: bool = Query(True),
+    overlap: float = Query(0.05),
+    audio_offset: int = Query(21),
+    stereo: bool = Query(False),
+    channel_order: Literal["LR", "RL"] = Query("LR"),
+):
+    """Return the sample data for the overlap join between the current and
+    next audio frame, so the UI can plot it and flag a non-seamless splice."""
+    _check_loaded()
+    source = _state["source"]
+    try:
+        corrected_a, corrected_b, prev_audio_idx, next_audio_idx = decoder._load_overlap_frame_pair(
+            source, index, audio_offset, top, bottom, left, right,
+            rotate=rotate, negative=negative, soundtrack_color=soundtrack_color,
+            dmin_percentile=dmin_percentile, dmin_headroom=dmin_headroom,
+            binary_mask=binary_mask, binary_lb=binary_lb, binary_ub=binary_ub,
+            dmin_value=dmin_value, integrate=integrate,
+        )
+        result = decoder.compute_overlap_waveform(
+            corrected_a, corrected_b, overlap, stereo=stereo, channel_order=channel_order,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    result["prev_audio_frame"] = prev_audio_idx
+    result["next_audio_frame"] = next_audio_idx
+    return result
+
+
 class ExtractRequest(BaseModel):
     top: int
     bottom: int
