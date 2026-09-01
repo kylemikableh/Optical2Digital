@@ -30,8 +30,11 @@ Extracts audio from scanned motion picture film optical soundtracks (variable-ar
 """
 
 import argparse
+import concurrent.futures
+import contextlib
 import io
 import os
+import queue
 import struct
 import sys
 import threading
@@ -268,6 +271,62 @@ def extract_stereo_scanline_audio(corrected_img):
 # Overlap stitching
 # ---------------------------------------------------------------------------
 
+# Guards the O(L^2) vectorized overlap-error computation below from growing
+# unbounded on a pathological crop/overlap-fraction combination (very tall
+# crop + large --overlap). Above this size, _overlap_errors() falls back to
+# the original per-offset Python loop instead of risking a multi-hundred-MB
+# temporary-array spike on memory-constrained hardware (e.g. Raspberry Pi).
+_OVERLAP_VECTORIZE_MAX_L = 3000
+
+
+def _overlap_errors_loop(prev_samples, curr_samples, search_range):
+    """Original per-offset loop: mean(|prev[-o:] - curr[:o]|) for o in
+    1..search_range-1. Kept as the fallback for very large search ranges
+    (see _OVERLAP_VECTORIZE_MAX_L) and as the reference implementation
+    _overlap_errors_vectorized() is checked against in tests."""
+    errors = np.empty(search_range - 1, dtype=np.float64)
+    for offset in range(1, search_range):
+        errors[offset - 1] = np.mean(np.abs(prev_samples[-offset:] - curr_samples[:offset]))
+    return errors
+
+
+def _overlap_errors_vectorized(prev_samples, curr_samples, search_range):
+    """Vectorized replacement for _overlap_errors_loop(): computes the same
+    per-offset mean-absolute-difference values, without a Python-level loop
+    over offsets.
+
+    For offset o, the compared windows are prev_samples[-o:] and
+    curr_samples[:o] — both length o, paired element-by-element in order.
+    Writing L = search_range - 1, prev_tail = prev_samples[-L:] and
+    curr_head = curr_samples[:L], the k-th element (k = 0..o-1) of that
+    comparison is prev_tail[L-o+k] vs curr_head[k] — a fixed indexing
+    pattern that only depends on (o, k), not on any running state. That
+    lets every offset's window be gathered in one vectorized pass over an
+    (L, L) grid instead of one Python-level numpy call per offset:
+      - row r = o - 1 (r = 0..L-1)
+      - column k = 0..L-1, valid where k <= r (i.e. k < o)
+      - prev index for (r, k) is L-1-r+k, always in [0, L-1] where valid.
+    """
+    L = search_range - 1
+    if L > _OVERLAP_VECTORIZE_MAX_L:
+        return _overlap_errors_loop(prev_samples, curr_samples, search_range)
+
+    prev_tail = prev_samples[-L:]
+    curr_head = curr_samples[:L]
+
+    r = np.arange(L)[:, None]
+    k = np.arange(L)[None, :]
+    valid = k <= r
+    # Clip so out-of-range (invalid) positions still index safely into
+    # prev_tail -- their values are discarded by `valid` below regardless.
+    prev_idx = np.clip((L - 1 - r) + k, 0, L - 1)
+    diff = np.abs(prev_tail[prev_idx] - curr_head)  # curr_head broadcasts over rows
+
+    counts = valid.sum(axis=1)
+    sums = np.sum(diff, axis=1, where=valid)
+    return sums / counts
+
+
 def find_best_overlap(prev_samples, curr_samples, max_overlap):
     """Find the overlap offset that best aligns the end of prev with the start of curr.
 
@@ -278,14 +337,11 @@ def find_best_overlap(prev_samples, curr_samples, max_overlap):
     if search_range < 2:
         return 0
 
-    best_offset = 0
-    best_error = float("inf")
-
-    for offset in range(1, search_range):
-        error = np.mean(np.abs(prev_samples[-offset:] - curr_samples[:offset]))
-        if error < best_error:
-            best_error = error
-            best_offset = offset
+    errors = _overlap_errors_vectorized(prev_samples, curr_samples, search_range)
+    # argmin returns the first occurrence of the minimum, matching the
+    # original loop's strict `<` comparison (first strictly-lower error
+    # wins ties, earlier offsets are never displaced by an equal error).
+    best_offset = int(np.argmin(errors)) + 1
 
     return best_offset
 
@@ -448,16 +504,10 @@ def _find_best_overlap_with_error(prev_samples, curr_samples, max_overlap):
     if search_range < 2:
         return 0, 0.0
 
-    best_offset = 0
-    best_error = float("inf")
+    errors = _overlap_errors_vectorized(prev_samples, curr_samples, search_range)
+    best_idx = int(np.argmin(errors))
 
-    for offset in range(1, search_range):
-        error = np.mean(np.abs(prev_samples[-offset:] - curr_samples[:offset]))
-        if error < best_error:
-            best_error = error
-            best_offset = offset
-
-    return best_offset, float(best_error)
+    return best_idx + 1, float(errors[best_idx])
 
 
 def compute_overlap_waveform(corrected_a, corrected_b, overlap_frac, stereo=False,
@@ -769,6 +819,47 @@ class VideoSource:
             return None
         return frame
 
+    def iter_frames(self, start, stop):
+        """Yield (index, frame) for index in [start, stop] (inclusive),
+        decoding sequentially after a single seek to *start* instead of
+        load_frame()'s seek-per-call.
+
+        For most codecs (anything with GOPs, e.g. H.264/HEVC),
+        load_frame()'s CAP_PROP_POS_FRAMES seek forces a decode from the
+        nearest preceding keyframe forward to the target on every call --
+        calling it in an ascending loop redoes that keyframe-to-target
+        decode work every single frame. This method decodes forward once
+        instead.
+
+        Uses a second, independent cv2.VideoCapture opened on the same
+        file rather than self._cap/self._lock -- video files support
+        multiple independent read handles, so this never contends with
+        load_frame()'s random-access callers (e.g. server.py's frame
+        preview endpoints), which keep using load_frame() unchanged.
+
+        Stops early (without raising) if a read fails before reaching
+        *stop* -- e.g. the container's reported frame count was slightly
+        optimistic. Callers must treat any index in [start, stop] that was
+        never yielded as missing, exactly like a load_frame() None return.
+        """
+        start = max(0, start)
+        stop = min(stop, self._num_frames - 1)
+        if start > stop:
+            return
+        cap = cv2.VideoCapture(self._path)
+        try:
+            if not cap.isOpened():
+                return
+            if start > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+            for index in range(start, stop + 1):
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    return
+                yield index, frame
+        finally:
+            cap.release()
+
     def close(self):
         self._cap.release()
 
@@ -813,6 +904,25 @@ def rotate_image(img, degrees):
     return img
 
 
+# NOTE on GPU/OpenCL: this function's actual per-pixel math (dtype cast,
+# invert, clip, Dmin's np.percentile, the scanline row-mean) is plain NumPy
+# on float64 arrays, not cv2 -- routing it through cv2.UMat/OpenCL would
+# only touch the few incidental cv2 calls here (absdiff in
+# select_soundtrack_channel, threshold in apply_binary_mask_threshold,
+# rotate in rotate_image), not the real per-pixel work, short of a much
+# larger rewrite around cv2/UMat or a tensor library (Torch/CuPy). It was
+# evaluated and deliberately deprioritized in favor of the CPU-side fixes
+# in this module (sequential VideoSource decoding, thread-pool frame
+# parallelism, vectorized overlap search): those target the actual
+# measured bottlenecks and are portable to every platform, including the
+# weak-hardware target this app names in README.md (Raspberry Pi/Ampere
+# arm64), where OpenCL support is unreliable-to-absent in practice -- a
+# UMat path would likely just no-op back to CPU there while adding real
+# packaging risk (no existing PyInstaller GPU-library hooks; opencv-python
+# itself already lacks a Windows ARM64 wheel, a bad sign for bundling a
+# GPU tensor library too). Worth revisiting only if profiling after those
+# CPU-side fixes still shows the cv2-side calls specifically (not the
+# NumPy math) as a bottleneck.
 def crop_and_correct(img, top, bottom, left, right, rotate=0,
                      negative=False, soundtrack_color="B&W",
                      dmin_percentile=99.5, dmin_headroom=0.2,
@@ -876,6 +986,157 @@ def frame_to_jpeg(img):
     if not ok:
         raise RuntimeError("JPEG encoding failed")
     return buf.tobytes()
+
+
+# ---------------------------------------------------------------------------
+# Thread-pool frame processing (shared by extract_audio() and CLI main())
+# ---------------------------------------------------------------------------
+
+def _default_pool_size():
+    """Default thread-pool size for parallel frame processing: enough to
+    get real concurrency without hardcoding a large pool that starves the
+    UI/server thread (or other work happening alongside the CLI) on a
+    low-core machine like a Raspberry Pi."""
+    return min(os.cpu_count() or 4, 8)
+
+
+def _run_video_frame_pool(source, position_by_source_idx, process_one, cancel_event, num_workers):
+    """Decode source's frames sequentially via iter_frames() (video decode
+    is inherently stateful -- this part can't itself be parallelized),
+    while a pool of worker threads runs process_one(position, img)
+    concurrently on already-decoded frames (pure CPU, no shared state,
+    parallelizes cleanly).
+
+    process_one(position, img) is called concurrently from worker threads
+    for distinct positions -- safe here since crop_and_correct()/
+    extract_scanline_audio() are pure functions with no shared mutable
+    state, and each call only ever writes its own position's output slot.
+
+    Raises whatever process_one raised (re-raised on the calling thread),
+    or ExtractionCancelled if cancel_event was set. Returns the set of
+    positions actually processed -- callers compare this against
+    position_by_source_idx's positions to find frames that were requested
+    but never decoded (e.g. a read failed before reaching the end of the
+    range) and must be treated as missing, same as a load_frame() None.
+    """
+    if not position_by_source_idx:
+        return set()
+
+    lo = min(position_by_source_idx)
+    hi = max(position_by_source_idx)
+
+    # Bounded so the sequential decode (one fast, CPU-bound C call per
+    # frame) can't race arbitrarily far ahead of the worker pool and pile
+    # up decoded frames in memory -- a real concern at scan resolution on
+    # memory-constrained hardware.
+    work_q = queue.Queue(maxsize=max(2 * num_workers, 8))
+    stop = threading.Event()
+    errors = []
+    errors_lock = threading.Lock()
+    processed = set()
+    processed_lock = threading.Lock()
+
+    def _cancelled():
+        return stop.is_set() or (cancel_event is not None and cancel_event.is_set())
+
+    def worker():
+        while True:
+            item = work_q.get()
+            try:
+                if item is None:
+                    return
+                if _cancelled():
+                    continue
+                position, img = item
+                try:
+                    process_one(position, img)
+                except Exception as exc:
+                    with errors_lock:
+                        errors.append(exc)
+                    stop.set()
+                else:
+                    with processed_lock:
+                        processed.add(position)
+            finally:
+                work_q.task_done()
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(num_workers)]
+    for t in threads:
+        t.start()
+
+    try:
+        with contextlib.closing(source.iter_frames(lo, hi)) as frames:
+            for s_idx, img in frames:
+                if _cancelled():
+                    break
+                position = position_by_source_idx.get(s_idx)
+                if position is None:
+                    continue
+                work_q.put((position, img))
+    finally:
+        for _ in threads:
+            work_q.put(None)
+        for t in threads:
+            t.join()
+
+    if errors:
+        raise errors[0]
+    # Only raise for cancellation that actually left work undone -- if
+    # cancel_event happened to flip just as the very last frame finished,
+    # let the (complete, correct) result through rather than discarding it
+    # on a narrow race.
+    if cancel_event is not None and cancel_event.is_set() and len(processed) < len(position_by_source_idx):
+        raise ExtractionCancelled()
+
+    return processed
+
+
+def _run_sequence_frame_pool(positions, load_one, process_one, cancel_event, num_workers):
+    """Parallelize independent per-position work (load_one(position) then
+    process_one(position, img)) across a thread pool.
+
+    Used for ImageSequenceSource, where each frame is its own file read
+    (cv2.imread/dpx) with no shared decode state -- unlike VideoSource,
+    there's no single stateful decoder to bottleneck on, so both the file
+    I/O and the crop/correct/reduce work parallelize across threads
+    directly.
+
+    Returns the set of positions that were both present (load_one()
+    returned a non-None image) and successfully processed; callers treat
+    any position not in that set as missing.
+    """
+    if not positions:
+        return set()
+
+    processed = set()
+    processed_lock = threading.Lock()
+
+    def task(position):
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        img = load_one(position)
+        if img is None:
+            return
+        process_one(position, img)
+        with processed_lock:
+            processed.add(position)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
+    try:
+        futures = [executor.submit(task, position) for position in positions]
+        for future in concurrent.futures.as_completed(futures):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            future.result()  # re-raises any exception from task()
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    # Only raise for cancellation that actually left work undone -- see the
+    # matching comment in _run_video_frame_pool().
+    if cancel_event is not None and cancel_event.is_set() and len(processed) < len(positions):
+        raise ExtractionCancelled()
+
+    return processed
 
 
 def extract_audio(source, top, bottom, left, right,
@@ -945,9 +1206,6 @@ def extract_audio(source, top, bottom, left, right,
     start_frame = max(0, start_frame)
 
     _phase("Processing frames")
-    all_left = []
-    all_right = [] if stereo else None
-    missing_indices = []
     # Extend past end_frame by audio_offset frames to capture the real
     # trailing soundtrack data described above (only when audio_offset is
     # positive -- the physically-typical case of sound printed earlier).
@@ -955,25 +1213,49 @@ def extract_audio(source, top, bottom, left, right,
     if reverse:
         indices = indices[::-1]
     total = len(indices)
+    # source_indices[position] is the source frame the picture at
+    # indices[position] actually reads audio from (idx - audio_offset).
+    # Since indices is a contiguous run (just reversed when *reverse*),
+    # source_indices is too -- ascending when not reversed, descending when
+    # reversed. VideoSource frames are always decoded in ascending source
+    # order below (regardless of *reverse*) since seeking backwards isn't
+    # efficient; results are placed into their correct output position via
+    # position_by_source_idx, so the picture-order/decode-order mismatch
+    # when reversed never affects correctness.
+    source_indices = [idx - audio_offset for idx in indices]
 
-    for count, idx in enumerate(indices):
-        if cancel_event is not None and cancel_event.is_set():
-            raise ExtractionCancelled()
-        img = source.load_frame(idx - audio_offset)
-        if img is None:
-            # No corresponding source frame for this picture frame's
-            # audio_offset-shifted soundtrack position -- most commonly
-            # because idx - audio_offset is before the start of the scan.
-            # Record a placeholder now and backfill it with silence below
-            # (once a real chunk's length is known) rather than dropping
-            # it: dropping would shrink the output track by audio_offset
-            # frames' worth of time and slide all audio earlier, silently
-            # undoing the offset instead of applying it.
-            missing_indices.append(len(all_left))
-            all_left.append(None)
-            if stereo:
-                all_right.append(None)
-            continue
+    all_left = [None] * total
+    all_right = [None] * total if stereo else None
+    missing_indices = []
+
+    completed = 0
+    progress_lock = threading.Lock()
+
+    def _mark_done():
+        # See progress_every in the docstring: batched (not called every
+        # frame) by default — reporting every frame makes server.py's
+        # frame viewer re-fetch a preview image on nearly every progress
+        # tick, which competes for CPU with this loop's own decode/correct
+        # work rather than being the free couple-of-attribute-writes it
+        # looks like in isolation. `completed` counts positions resolved
+        # so far (real or backfilled-as-missing) -- it still advances
+        # monotonically from 0 to `total` exactly once each regardless of
+        # source-vs-picture or decode/completion order (worker threads call
+        # this concurrently, hence the lock), which is all
+        # progress_callback relies on.
+        nonlocal completed
+        with progress_lock:
+            completed += 1
+            current = completed
+        if progress_callback and (current % progress_every == 0 or current == total):
+            progress_callback(current, total)
+
+    def _process_frame(position, img):
+        # Called from worker threads (possibly concurrently, for distinct
+        # positions) by the thread pools below -- safe since
+        # crop_and_correct()/extract_*_scanline_audio() are pure functions
+        # with no shared mutable state, and each call only ever writes its
+        # own position's slot in all_left/all_right.
         corrected = crop_and_correct(
             img,
             top,
@@ -993,18 +1275,52 @@ def extract_audio(source, top, bottom, left, right,
         )
         if stereo:
             l_ch, r_ch = extract_stereo_scanline_audio(corrected)
-            all_left.append(l_ch)
-            all_right.append(r_ch)
+            all_left[position] = l_ch
+            all_right[position] = r_ch
         else:
-            all_left.append(extract_scanline_audio(corrected))
-        # See progress_every in the docstring: batched (not called every
-        # frame) by default — reporting every frame makes server.py's
-        # frame viewer re-fetch a preview image on nearly every progress
-        # tick, which competes for CPU with this loop's own decode/correct
-        # work rather than being the free couple-of-attribute-writes it
-        # looks like in isolation.
-        if progress_callback and ((count + 1) % progress_every == 0 or count + 1 == total):
-            progress_callback(count + 1, total)
+            all_left[position] = extract_scanline_audio(corrected)
+        _mark_done()
+
+    num_workers = _default_pool_size()
+
+    if isinstance(source, VideoSource):
+        # No corresponding source frame for this picture frame's
+        # audio_offset-shifted soundtrack position -- most commonly because
+        # idx - audio_offset is before the start of the scan. Recorded now
+        # and backfilled with silence below (once a real chunk's length is
+        # known) rather than dropped: dropping would shrink the output
+        # track by audio_offset frames' worth of time and slide all audio
+        # earlier, silently undoing the offset instead of applying it.
+        position_by_source_idx = {}
+        for position, s_idx in enumerate(source_indices):
+            if s_idx < 0 or s_idx >= source.num_frames:
+                missing_indices.append(position)
+                _mark_done()
+            else:
+                position_by_source_idx[s_idx] = position
+
+        processed = _run_video_frame_pool(
+            source, position_by_source_idx, _process_frame, cancel_event, num_workers
+        )
+        # Anything the pool didn't reach (e.g. a read failed before hitting
+        # the end of the range, despite being in the container's reported
+        # frame count) becomes missing too, same as a load_frame() None.
+        for s_idx, position in position_by_source_idx.items():
+            if position not in processed:
+                missing_indices.append(position)
+                _mark_done()
+    else:
+        def _load_one(position):
+            return source.load_frame(source_indices[position])
+
+        positions = list(range(total))
+        processed = _run_sequence_frame_pool(
+            positions, _load_one, _process_frame, cancel_event, num_workers
+        )
+        for position in positions:
+            if position not in processed:
+                missing_indices.append(position)
+                _mark_done()
 
     if len(missing_indices) == len(all_left):
         raise ValueError("No frames were successfully processed")
@@ -1187,9 +1503,6 @@ def main():
         print(f"Dumping cropped images to '{args.dump_crops}/'")
 
     # --- Process frames ---
-    all_samples = []
-    missing_indices = []
-
     # Extend past the last picture frame by audio_offset frames: the source
     # frames at the very end of the scan hold real soundtrack data for
     # picture positions beyond num_frames - 1 that were never scanned as
@@ -1198,24 +1511,31 @@ def main():
     if args.reverse:
         indices = indices[::-1]
     total_indices = len(indices)
+    # See extract_audio()'s matching comment: source_indices is a constant
+    # shift of `indices`, so it's contiguous ascending/descending too.
+    # VideoSource frames are decoded in ascending source order below
+    # (regardless of args.reverse) and placed into their correct output
+    # position via position_by_source_idx.
+    source_indices = [frame_idx - args.audio_offset for frame_idx in indices]
 
-    for count, frame_idx in enumerate(indices):
-        img = source.load_frame(frame_idx - args.audio_offset)
-        if img is None:
-            # No corresponding source frame for this picture frame's
-            # audio_offset-shifted soundtrack position -- most commonly
-            # because frame_idx - args.audio_offset is before the start of
-            # the scan. Backfilled with silence below (once a real chunk's
-            # length is known) rather than dropped: dropping would shrink
-            # the output track by audio_offset frames' worth of time and
-            # slide all audio earlier, silently undoing the offset instead
-            # of applying it.
-            print(f"  Note: no source frame at {frame_idx - args.audio_offset} "
-                  f"(audio_offset={args.audio_offset}); using silence.", file=sys.stderr)
-            missing_indices.append(len(all_samples))
-            all_samples.append(None)
-            continue
+    all_samples = [None] * total_indices
+    missing_indices = []
+    completed = 0
+    progress_lock = threading.Lock()
 
+    def _mark_done():
+        nonlocal completed
+        with progress_lock:
+            completed += 1
+            current = completed
+        if current % 50 == 0 or current == total_indices:
+            print(f"  Processed {current}/{total_indices} frames", file=sys.stderr)
+
+    def _process_frame(position, img):
+        # May be called from worker threads (possibly concurrently, for
+        # distinct positions) by the thread pools below -- see the matching
+        # comment in extract_audio()'s _process_frame for why that's safe.
+        frame_idx = indices[position]
         img_corrected = crop_and_correct(
             img,
             top,
@@ -1240,12 +1560,52 @@ def main():
             cv2.imwrite(dump_path, (img_corrected * 255).astype(np.uint8))
 
         # Extract audio: mean brightness per row → one sample per scanline
-        frame_samples = extract_scanline_audio(img_corrected)
-        all_samples.append(frame_samples)
+        all_samples[position] = extract_scanline_audio(img_corrected)
+        _mark_done()
 
-        # Progress
-        if (count + 1) % 50 == 0 or (count + 1) == total_indices:
-            print(f"  Processed {count + 1}/{total_indices} frames", file=sys.stderr)
+    def _note_missing(position):
+        # No corresponding source frame for this picture frame's
+        # audio_offset-shifted soundtrack position -- most commonly
+        # because frame_idx - args.audio_offset is before the start of
+        # the scan. Backfilled with silence below (once a real chunk's
+        # length is known) rather than dropped: dropping would shrink
+        # the output track by audio_offset frames' worth of time and
+        # slide all audio earlier, silently undoing the offset instead
+        # of applying it.
+        print(f"  Note: no source frame at {source_indices[position]} "
+              f"(audio_offset={args.audio_offset}); using silence.", file=sys.stderr)
+        missing_indices.append(position)
+
+    num_workers = _default_pool_size()
+
+    if isinstance(source, VideoSource):
+        position_by_source_idx = {}
+        for position, s_idx in enumerate(source_indices):
+            if s_idx < 0 or s_idx >= source.num_frames:
+                _note_missing(position)
+                _mark_done()
+            else:
+                position_by_source_idx[s_idx] = position
+
+        processed = _run_video_frame_pool(
+            source, position_by_source_idx, _process_frame, None, num_workers
+        )
+        for s_idx, position in position_by_source_idx.items():
+            if position not in processed:
+                _note_missing(position)
+                _mark_done()
+    else:
+        def _load_one(position):
+            return source.load_frame(source_indices[position])
+
+        positions = list(range(total_indices))
+        processed = _run_sequence_frame_pool(
+            positions, _load_one, _process_frame, None, num_workers
+        )
+        for position in positions:
+            if position not in processed:
+                _note_missing(position)
+                _mark_done()
 
     if len(missing_indices) == len(all_samples):
         print("Error: no frames were successfully processed", file=sys.stderr)

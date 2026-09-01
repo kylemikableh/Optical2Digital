@@ -118,56 +118,6 @@ function useDebouncedJson(url, delay = 150) {
   return [data, error]
 }
 
-/** Same debounce/abort behavior as useDebouncedImageUrl but for a JSON
- *  endpoint — returns [data, error], surfacing the server's error detail
- *  (e.g. "Overlap must be greater than 0...") so callers can render an
- *  explanatory empty state instead of failing silently. */
-function useDebouncedJson(url, delay = 150) {
-  const [data, setData] = useState(null)
-  const [error, setError] = useState(null)
-  const abortRef = useRef(null)
-
-  useEffect(() => {
-    if (!url) {
-      if (abortRef.current) abortRef.current.abort()
-      setData(null)
-      setError(null)
-      return
-    }
-
-    const timer = setTimeout(() => {
-      if (abortRef.current) abortRef.current.abort()
-      const ac = new AbortController()
-      abortRef.current = ac
-
-      fetch(url, { signal: ac.signal })
-        .then(async r => {
-          const body = await r.json()
-          if (!r.ok) throw new Error(body.detail || 'Request failed')
-          return body
-        })
-        .then(body => {
-          if (ac.signal.aborted) return
-          setData(body)
-          setError(null)
-        })
-        .catch(e => {
-          if (e.name === 'AbortError' || ac.signal.aborted) return
-          setData(null)
-          setError(e.message)
-        })
-    }, delay)
-
-    return () => clearTimeout(timer)
-  }, [url, delay])
-
-  useEffect(() => () => {
-    if (abortRef.current) abortRef.current.abort()
-  }, [])
-
-  return [data, error]
-}
-
 function saveSettings(path, settings) {
   try { localStorage.setItem(SETTINGS_PREFIX + path, JSON.stringify(settings)) } catch {}
 }
@@ -261,7 +211,6 @@ function App() {
   const [startFrame, setStartFrame] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
   const [showOverlapPreview, setShowOverlapPreview] = useState(false)
-  const [showOverlapPreview, setShowOverlapPreview] = useState(false)
 
   // Crop overlay interaction
   const imgRef = useRef(null)
@@ -346,7 +295,6 @@ function App() {
         setStartFrame(saved.startFrame ?? 0)
         setEndFrame(saved.endFrame ?? data.num_frames - 1)
         setShowOverlapPreview(saved.showOverlapPreview ?? false)
-        setShowOverlapPreview(saved.showOverlapPreview ?? false)
       } else {
         if (data.fps != null) setFps(data.fps)
         setStartFrame(0)
@@ -400,15 +348,12 @@ function App() {
       showZoom, zoomLevel,
       startFrame, endFrame,
       showOverlapPreview,
-      showOverlapPreview,
     })
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
       fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
       showZoom, zoomLevel,
-      startFrame, endFrame,
-      showOverlapPreview])
       startFrame, endFrame,
       showOverlapPreview])
 
@@ -623,7 +568,6 @@ function App() {
         startFrame,
         endFrame,
         showOverlapPreview,
-        showOverlapPreview,
       },
     }
 
@@ -649,7 +593,6 @@ function App() {
     a.click()
     URL.revokeObjectURL(url)
     setStatus(`Saved settings file: ${filename}`)
-  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame, showOverlapPreview])
   }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame, showOverlapPreview])
 
   // Shared by handleImportSettingsFile (settings-only import) and
@@ -684,7 +627,6 @@ function App() {
     setZoomLevel(Number(saved.zoomLevel ?? 6))
     setStartFrame(Math.max(0, Math.min(Number(saved.startFrame ?? 0), maxFrame)))
     setEndFrame(Math.max(0, Math.min(Number(saved.endFrame ?? maxFrame), maxFrame)))
-    setShowOverlapPreview(Boolean(saved.showOverlapPreview ?? false))
     setShowOverlapPreview(Boolean(saved.showOverlapPreview ?? false))
   }, [])
 
@@ -1771,14 +1713,6 @@ function App() {
                 onChange={e => setFrameIndex(Number(e.target.value))}
                 style={{ width: 200 }}
               />
-              <button
-                className="btn-secondary btn-small"
-                aria-pressed={showOverlapPreview}
-                title="Preview the audio splice between this frame and the next"
-                onClick={() => setShowOverlapPreview(v => !v)}
-              >
-                {showOverlapPreview ? 'Hide' : 'Show'} Splice Preview
-              </button>
               <button
                 className="btn-secondary btn-small"
                 aria-pressed={showOverlapPreview}
