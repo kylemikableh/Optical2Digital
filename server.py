@@ -266,6 +266,87 @@ def estimate_dmin(
     }
 
 
+@app.get("/api/frame/{index}/overlap-splice-image")
+def get_overlap_splice_image(
+    index: int,
+    top: int = Query(0),
+    bottom: int = Query(0),
+    left: int = Query(0),
+    right: int = Query(0),
+    rotate: int = Query(0),
+    negative: bool = Query(False),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    dmin_percentile: float = Query(99.5),
+    dmin_value: float | None = Query(None),
+    dmin_headroom: float = Query(0.2),
+    binary_mask: bool = Query(False),
+    binary_lb: int = Query(96),
+    binary_ub: int = Query(255),
+    integrate: bool = Query(True),
+    overlap: float = Query(0.05),
+):
+    """Return a JPEG of the bottom of the current frame's crop stacked
+    against the top of the next frame's crop, spanning the overlap
+    search window, for visual inspection of the splice."""
+    _check_loaded()
+    source = _state["source"]
+    try:
+        corrected_a, corrected_b, _, _ = decoder._load_overlap_frame_pair(
+            source, index, top, bottom, left, right,
+            rotate=rotate, negative=negative, soundtrack_color=soundtrack_color,
+            dmin_percentile=dmin_percentile, dmin_headroom=dmin_headroom,
+            binary_mask=binary_mask, binary_lb=binary_lb, binary_ub=binary_ub,
+            dmin_value=dmin_value, integrate=integrate,
+        )
+        splice_img = decoder.build_overlap_splice_image(corrected_a, corrected_b, overlap)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return Response(content=decoder.corrected_to_jpeg(splice_img), media_type="image/jpeg")
+
+
+@app.get("/api/frame/{index}/overlap-waveform")
+def get_overlap_waveform(
+    index: int,
+    top: int = Query(0),
+    bottom: int = Query(0),
+    left: int = Query(0),
+    right: int = Query(0),
+    rotate: int = Query(0),
+    negative: bool = Query(False),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    dmin_percentile: float = Query(99.5),
+    dmin_value: float | None = Query(None),
+    dmin_headroom: float = Query(0.2),
+    binary_mask: bool = Query(False),
+    binary_lb: int = Query(96),
+    binary_ub: int = Query(255),
+    integrate: bool = Query(True),
+    overlap: float = Query(0.05),
+    stereo: bool = Query(False),
+    channel_order: Literal["LR", "RL"] = Query("LR"),
+):
+    """Return the sample data for the overlap join between the current and
+    next frame, so the UI can plot it and flag a non-seamless splice."""
+    _check_loaded()
+    source = _state["source"]
+    try:
+        corrected_a, corrected_b, prev_idx, next_idx = decoder._load_overlap_frame_pair(
+            source, index, top, bottom, left, right,
+            rotate=rotate, negative=negative, soundtrack_color=soundtrack_color,
+            dmin_percentile=dmin_percentile, dmin_headroom=dmin_headroom,
+            binary_mask=binary_mask, binary_lb=binary_lb, binary_ub=binary_ub,
+            dmin_value=dmin_value, integrate=integrate,
+        )
+        result = decoder.compute_overlap_waveform(
+            corrected_a, corrected_b, overlap, stereo=stereo, channel_order=channel_order,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    result["prev_frame"] = prev_idx
+    result["next_frame"] = next_idx
+    return result
+
+
 class ExtractRequest(BaseModel):
     top: int
     bottom: int
@@ -293,6 +374,7 @@ class ExtractRequest(BaseModel):
     start_frame: int = 0
     end_frame: int | None = None
     bit_depth: Literal["int16", "int24", "int32", "float32"] = "int16"
+    save_path: str | None = None
 
 
 @app.post("/api/extract")
@@ -321,6 +403,8 @@ def extract(req: ExtractRequest):
     _extract_job["cancelled"] = False
     _extract_job["cancel_event"] = threading.Event()
     _extract_job["wav_bytes"] = None
+    _extract_job["saved_path"] = None
+    save_path = req.save_path
 
     def _run():
         try:
@@ -363,11 +447,33 @@ def extract(req: ExtractRequest):
                 progress_callback=progress_cb,
                 phase_callback=phase_cb,
             )
-            _extract_job["wav_bytes"] = wav_bytes
+            if save_path:
+                # Native Save panel flow — the path was already chosen
+                # before this job started, so write straight to disk
+                # instead of round-tripping the bytes back through
+                # /api/extract/result.
+                try:
+                    with open(save_path, "wb") as f:
+                        f.write(wav_bytes)
+                    _extract_job["saved_path"] = save_path
+                except OSError as e:
+                    if os.path.exists(save_path):
+                        try:
+                            os.remove(save_path)
+                        except OSError:
+                            pass
+                    raise RuntimeError(f"Failed to save file: {e}") from e
+            else:
+                _extract_job["wav_bytes"] = wav_bytes
             _extract_job["phase"] = "Complete"
         except decoder.ExtractionCancelled:
             _extract_job["cancelled"] = True
             _extract_job["phase"] = "Cancelled"
+            if save_path and os.path.exists(save_path):
+                try:
+                    os.remove(save_path)
+                except OSError:
+                    pass
         except Exception as e:
             _extract_job["error"] = str(e)
             _extract_job["phase"] = "Error"
@@ -464,6 +570,8 @@ def export_video(req: ExtractRequest):
     _export_video_job["cancelled"] = False
     _export_video_job["cancel_event"] = threading.Event()
     _export_video_job["video_bytes"] = None
+    _export_video_job["saved_path"] = None
+    save_path = req.save_path
 
     def _run():
         cancel_event = _export_video_job["cancel_event"]
@@ -528,12 +636,34 @@ def export_video(req: ExtractRequest):
                     _render_image_sequence(source, wav_path, out_path, req.fps, req.rotate, start, end, tmpdir, cancel_event)
 
                 phase_cb("Finalizing")
-                with open(out_path, "rb") as f:
-                    _export_video_job["video_bytes"] = f.read()
+                if save_path:
+                    # Native Save panel flow — the path was already chosen
+                    # before this job started. ffmpeg already wrote the
+                    # finished file to out_path, so just move it straight
+                    # to the destination rather than reading it back into
+                    # memory and round-tripping through /api/export/video/result.
+                    try:
+                        shutil.move(out_path, save_path)
+                        _export_video_job["saved_path"] = save_path
+                    except OSError as e:
+                        if os.path.exists(save_path):
+                            try:
+                                os.remove(save_path)
+                            except OSError:
+                                pass
+                        raise RuntimeError(f"Failed to save file: {e}") from e
+                else:
+                    with open(out_path, "rb") as f:
+                        _export_video_job["video_bytes"] = f.read()
                 _export_video_job["phase"] = "Complete"
         except decoder.ExtractionCancelled:
             _export_video_job["cancelled"] = True
             _export_video_job["phase"] = "Cancelled"
+            if save_path and os.path.exists(save_path):
+                try:
+                    os.remove(save_path)
+                except OSError:
+                    pass
         except subprocess.CalledProcessError as e:
             stderr_tail = (e.stderr or b"").decode(errors="replace")[-800:]
             _export_video_job["error"] = f"ffmpeg failed: {stderr_tail or e}"

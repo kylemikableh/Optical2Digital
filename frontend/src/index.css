@@ -98,11 +98,16 @@ h1, h2, h3 { font-weight: 600; }
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .crop-canvas {
-  flex: 1;
+  /* Grow to fill available space when nothing else is docked below it, but
+     never shrink below the size of its own content (the frame image) — if
+     the splice preview panel is appended below and there isn't enough
+     viewport left, .preview-area scrolls instead of squeezing this down. */
+  flex: 1 0 auto;
   overflow: auto;
   display: flex;
   align-items: center;
@@ -264,6 +269,7 @@ h1, h2, h3 { font-weight: 600; }
 }
 
 .frame-nav {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -274,6 +280,136 @@ h1, h2, h3 { font-weight: 600; }
 }
 
 .frame-nav span { font-size: 13px; color: var(--text-muted); min-width: 120px; text-align: center; }
+
+.overlap-preview-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 20px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.overlap-preview-header {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.overlap-preview-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 10px 0;
+}
+
+.overlap-splice-image-wrap {
+  position: relative;
+  min-height: 140px;
+  max-height: 220px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #000;
+}
+
+.overlap-splice-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  image-rendering: pixelated;
+}
+
+.overlap-splice-join-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+}
+
+.overlap-splice-marker {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: rgba(233, 69, 96, 0.22);
+  border-top: 1px dashed var(--accent);
+  border-bottom: 1px dashed var(--accent);
+  pointer-events: none;
+}
+
+.overlap-waveform-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.overlap-waveform-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: help;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+}
+.legend-prev { background: #6fb1ff; }
+.legend-next { background: #ffb86f; }
+.legend-stitched { background: var(--accent); }
+
+.overlap-waveform-chart { display: flex; flex-direction: column; gap: 4px; }
+
+.overlap-waveform-chart-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.alignment-error {
+  font-weight: 600;
+  cursor: help;
+}
+.alignment-error-good { color: #4caf6d; }
+.alignment-error-warn { color: #e0b23c; }
+.alignment-error-bad { color: var(--accent); }
+
+.overlap-preview-offset-note { cursor: help; }
+
+.overlap-waveform-svg {
+  width: 100%;
+  height: 90px;
+  background: #0a0a16;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.overlap-waveform-band { fill: rgba(233, 69, 96, 0.15); cursor: help; }
+.overlap-waveform-join { stroke: rgba(255, 255, 255, 0.35); stroke-width: 1; cursor: help; }
+
+.overlap-waveform-line { fill: none; stroke-width: 1; opacity: 0.55; vector-effect: non-scaling-stroke; cursor: help; }
+.overlap-waveform-line-prev { stroke: #6fb1ff; }
+.overlap-waveform-line-next { stroke: #ffb86f; }
+.overlap-waveform-line-stitched { stroke: var(--accent); stroke-dasharray: 4 3; }
+
+.overlap-waveform-points { pointer-events: none; }
+.overlap-waveform-dot { vector-effect: non-scaling-stroke; }
+.overlap-waveform-dot-prev { fill: #6fb1ff; }
+.overlap-waveform-dot-next { fill: #ffb86f; }
+.overlap-waveform-dot-stitched { fill: var(--accent); }
 
 .control-group { display: flex; flex-direction: column; gap: 6px; }
 
