@@ -40,8 +40,9 @@ Supported:
     text alone, since real-world DPX decoders have historically disagreed
     on bit-packing details the spec doesn't fully pin down.
   - Descriptor codes: 50 (RGB), 51 (RGBA, alpha decoded then dropped), and
-    1/2/3/6 (single-component/luminance -- scanners use these somewhat
-    interchangeably for monochrome scans).
+    1/2/3/4/6 (single-component/luminance -- scanners use these somewhat
+    interchangeably for monochrome scans, including 4/"Alpha" for a plain
+    density or soundtrack scan that isn't actually alpha/transparency).
   - Both byte orders (magic "SDPX" = big-endian, "XPDS" = little-endian).
 
 Deliberately unsupported (raises DPXError with a specific reason, never
@@ -83,6 +84,10 @@ _DESCRIPTOR_CHANNELS = {
     1: 1,   # Red -- scanners also use this for generic single-component/mono
     2: 1,   # Green
     3: 1,   # Blue
+    4: 1,   # Alpha -- also seen used by scanners for a single-component
+            # density/soundtrack scan that has nothing to do with actual
+            # transparency; same single-sample-per-pixel layout as the rest
+            # of this group, so decoded identically.
     6: 1,   # Luminance
     50: 3,  # R, G, B
     51: 4,  # R, G, B, A (alpha decoded then dropped)

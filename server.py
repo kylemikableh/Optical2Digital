@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 """
 
+import io
 import json
 import os
 import pathlib
@@ -33,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import wave
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -79,6 +81,7 @@ _extract_job = {
     "cancelled": False,
     "cancel_event": None,
     "wav_bytes": None,
+    "stats": None,
 }
 
 # Video export job state
@@ -92,6 +95,7 @@ _export_video_job = {
     "cancelled": False,
     "cancel_event": None,
     "video_bytes": None,
+    "stats": None,
 }
 
 
@@ -266,6 +270,93 @@ def estimate_dmin(
     }
 
 
+@app.get("/api/frame/{index}/overlap-splice-image")
+def get_overlap_splice_image(
+    index: int,
+    top: int = Query(0),
+    bottom: int = Query(0),
+    left: int = Query(0),
+    right: int = Query(0),
+    rotate: int = Query(0),
+    negative: bool = Query(False),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    dmin_percentile: float = Query(99.5),
+    dmin_value: float | None = Query(None),
+    dmin_headroom: float = Query(0.2),
+    binary_mask: bool = Query(False),
+    binary_lb: int = Query(96),
+    binary_ub: int = Query(255),
+    integrate: bool = Query(True),
+    overlap: float = Query(0.05),
+):
+    """Return a JPEG of the bottom of the current frame's crop stacked
+    against the top of the next frame's crop, spanning the overlap
+    search window, for visual inspection of the splice."""
+    _check_loaded()
+    source = _state["source"]
+    try:
+        corrected_a, corrected_b, _, _ = decoder._load_overlap_frame_pair(
+            source, index, top, bottom, left, right,
+            rotate=rotate, negative=negative, soundtrack_color=soundtrack_color,
+            dmin_percentile=dmin_percentile, dmin_headroom=dmin_headroom,
+            binary_mask=binary_mask, binary_lb=binary_lb, binary_ub=binary_ub,
+            dmin_value=dmin_value, integrate=integrate,
+        )
+        splice_img = decoder.build_overlap_splice_image(corrected_a, corrected_b, overlap)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return Response(content=decoder.corrected_to_jpeg(splice_img), media_type="image/jpeg")
+
+
+@app.get("/api/frame/{index}/overlap-waveform")
+def get_overlap_waveform(
+    index: int,
+    top: int = Query(0),
+    bottom: int = Query(0),
+    left: int = Query(0),
+    right: int = Query(0),
+    rotate: int = Query(0),
+    negative: bool = Query(False),
+    soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = Query("B&W"),
+    dmin_percentile: float = Query(99.5),
+    dmin_value: float | None = Query(None),
+    dmin_headroom: float = Query(0.2),
+    binary_mask: bool = Query(False),
+    binary_lb: int = Query(96),
+    binary_ub: int = Query(255),
+    integrate: bool = Query(True),
+    overlap: float = Query(0.05),
+    stereo: bool = Query(False),
+    channel_order: Literal["LR", "RL"] = Query("LR"),
+    forced_offset: int | None = Query(None),
+):
+    """Return the sample data for the overlap join between the current and
+    next frame, so the UI can plot it and flag a non-seamless splice.
+
+    *forced_offset*, if given, skips the auto-search and applies this fixed
+    offset instead -- used by the frontend's "Locked" overlap mode so paging
+    through frame pairs shows what the single locked offset does to each one."""
+    _check_loaded()
+    source = _state["source"]
+    try:
+        corrected_a, corrected_b, prev_idx, next_idx = decoder._load_overlap_frame_pair(
+            source, index, top, bottom, left, right,
+            rotate=rotate, negative=negative, soundtrack_color=soundtrack_color,
+            dmin_percentile=dmin_percentile, dmin_headroom=dmin_headroom,
+            binary_mask=binary_mask, binary_lb=binary_lb, binary_ub=binary_ub,
+            dmin_value=dmin_value, integrate=integrate,
+        )
+        result = decoder.compute_overlap_waveform(
+            corrected_a, corrected_b, overlap, stereo=stereo, channel_order=channel_order,
+            forced_offset=forced_offset,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    result["prev_frame"] = prev_idx
+    result["next_frame"] = next_idx
+    return result
+
+
 class ExtractRequest(BaseModel):
     top: int
     bottom: int
@@ -285,6 +376,8 @@ class ExtractRequest(BaseModel):
     hpf: float = 40.0
     lpf: float = 13500.0
     overlap: float = 0.25
+    overlap_mode: Literal["auto", "locked"] = "auto"
+    locked_offset: int = 0
     audio_offset: int = 21
     soundtrack_color: Literal["B&W", "High-Magenta", "Cyan"] = "B&W"
     reverse: bool = False
@@ -293,6 +386,7 @@ class ExtractRequest(BaseModel):
     start_frame: int = 0
     end_frame: int | None = None
     bit_depth: Literal["int16", "int24", "int32", "float32"] = "int16"
+    save_path: str | None = None
 
 
 @app.post("/api/extract")
@@ -321,6 +415,10 @@ def extract(req: ExtractRequest):
     _extract_job["cancelled"] = False
     _extract_job["cancel_event"] = threading.Event()
     _extract_job["wav_bytes"] = None
+    _extract_job["saved_path"] = None
+    _extract_job["stats"] = None
+    save_path = req.save_path
+    start_time = time.time()
 
     def _run():
         try:
@@ -351,6 +449,8 @@ def extract(req: ExtractRequest):
                 hpf=req.hpf,
                 lpf=req.lpf,
                 overlap=req.overlap,
+                overlap_mode=req.overlap_mode,
+                locked_offset=req.locked_offset,
                 audio_offset=req.audio_offset,
                 soundtrack_color=req.soundtrack_color,
                 stereo=req.stereo,
@@ -363,11 +463,36 @@ def extract(req: ExtractRequest):
                 progress_callback=progress_cb,
                 phase_callback=phase_cb,
             )
-            _extract_job["wav_bytes"] = wav_bytes
+            if save_path:
+                # Native Save panel flow — the path was already chosen
+                # before this job started, so write straight to disk
+                # instead of round-tripping the bytes back through
+                # /api/extract/result.
+                try:
+                    with open(save_path, "wb") as f:
+                        f.write(wav_bytes)
+                    _extract_job["saved_path"] = save_path
+                except OSError as e:
+                    if os.path.exists(save_path):
+                        try:
+                            os.remove(save_path)
+                        except OSError:
+                            pass
+                    raise RuntimeError(f"Failed to save file: {e}") from e
+            else:
+                _extract_job["wav_bytes"] = wav_bytes
+            _extract_job["stats"] = _completion_stats(
+                start_time, frame_count, len(wav_bytes), save_path, wav_bytes=wav_bytes
+            )
             _extract_job["phase"] = "Complete"
         except decoder.ExtractionCancelled:
             _extract_job["cancelled"] = True
             _extract_job["phase"] = "Cancelled"
+            if save_path and os.path.exists(save_path):
+                try:
+                    os.remove(save_path)
+                except OSError:
+                    pass
         except Exception as e:
             _extract_job["error"] = str(e)
             _extract_job["phase"] = "Error"
@@ -404,6 +529,7 @@ def extract_progress():
                 "done": _extract_job["done"],
                 "error": _extract_job["error"],
                 "cancelled": _extract_job["cancelled"],
+                "stats": _extract_job["stats"],
             }
             yield f"data: {json.dumps(data)}\n\n"
             if _extract_job["done"]:
@@ -464,6 +590,10 @@ def export_video(req: ExtractRequest):
     _export_video_job["cancelled"] = False
     _export_video_job["cancel_event"] = threading.Event()
     _export_video_job["video_bytes"] = None
+    _export_video_job["saved_path"] = None
+    _export_video_job["stats"] = None
+    save_path = req.save_path
+    start_time = time.time()
 
     def _run():
         cancel_event = _export_video_job["cancel_event"]
@@ -497,6 +627,8 @@ def export_video(req: ExtractRequest):
                     hpf=req.hpf,
                     lpf=req.lpf,
                     overlap=req.overlap,
+                    overlap_mode=req.overlap_mode,
+                    locked_offset=req.locked_offset,
                     audio_offset=req.audio_offset,
                     soundtrack_color=req.soundtrack_color,
                     stereo=req.stereo,
@@ -514,26 +646,61 @@ def export_video(req: ExtractRequest):
 
                 out_path = os.path.join(tmpdir, "output.mp4")
 
-                # No numeric progress available for the ffmpeg mux/render step —
-                # zero out total so the frontend switches from a progress bar to
-                # a plain status message.
+                # Reset before the mux/render phase -- its progress is now
+                # real (ffmpeg's own -progress output, see
+                # _run_subprocess_cancellable), but starts back at 0 rather
+                # than continuing from the audio-extraction phase's frame
+                # count, which was a different unit entirely.
                 _export_video_job["current"] = 0
                 _export_video_job["total"] = 0
 
                 if is_video:
                     phase_cb("Muxing video")
-                    _mux_video_source(source.path, wav_path, out_path, req.fps or source.fps, start, end, cancel_event)
+                    _mux_video_source(
+                        source.path, wav_path, out_path, req.fps or source.fps, start, end,
+                        cancel_event, progress_callback=progress_cb,
+                    )
                 else:
                     phase_cb("Rendering video")
-                    _render_image_sequence(source, wav_path, out_path, req.fps, req.rotate, start, end, tmpdir, cancel_event)
+                    _render_image_sequence(
+                        source, wav_path, out_path, req.fps, req.rotate, start, end, tmpdir,
+                        cancel_event, progress_callback=progress_cb,
+                    )
 
                 phase_cb("Finalizing")
-                with open(out_path, "rb") as f:
-                    _export_video_job["video_bytes"] = f.read()
+                if save_path:
+                    # Native Save panel flow — the path was already chosen
+                    # before this job started. ffmpeg already wrote the
+                    # finished file to out_path, so just move it straight
+                    # to the destination rather than reading it back into
+                    # memory and round-tripping through /api/export/video/result.
+                    try:
+                        shutil.move(out_path, save_path)
+                        _export_video_job["saved_path"] = save_path
+                        output_bytes_len = os.path.getsize(save_path)
+                    except OSError as e:
+                        if os.path.exists(save_path):
+                            try:
+                                os.remove(save_path)
+                            except OSError:
+                                pass
+                        raise RuntimeError(f"Failed to save file: {e}") from e
+                else:
+                    with open(out_path, "rb") as f:
+                        _export_video_job["video_bytes"] = f.read()
+                    output_bytes_len = len(_export_video_job["video_bytes"])
+                _export_video_job["stats"] = _completion_stats(
+                    start_time, frame_count, output_bytes_len, save_path, wav_bytes=wav_bytes
+                )
                 _export_video_job["phase"] = "Complete"
         except decoder.ExtractionCancelled:
             _export_video_job["cancelled"] = True
             _export_video_job["phase"] = "Cancelled"
+            if save_path and os.path.exists(save_path):
+                try:
+                    os.remove(save_path)
+                except OSError:
+                    pass
         except subprocess.CalledProcessError as e:
             stderr_tail = (e.stderr or b"").decode(errors="replace")[-800:]
             _export_video_job["error"] = f"ffmpeg failed: {stderr_tail or e}"
@@ -574,6 +741,7 @@ def export_video_progress():
                 "done": _export_video_job["done"],
                 "error": _export_video_job["error"],
                 "cancelled": _export_video_job["cancelled"],
+                "stats": _export_video_job["stats"],
             }
             yield f"data: {json.dumps(data)}\n\n"
             if _export_video_job["done"]:
@@ -613,6 +781,49 @@ def export_video_result(save_path: str | None = Query(None)):
 def _check_loaded():
     if _state["source"] is None:
         raise HTTPException(400, "No project loaded. POST /api/load first.")
+
+
+def _wav_audio_stats(wav_bytes):
+    """Read duration/sample-rate/channels/bit-depth back out of a WAV
+    file's own header rather than threading them through as separate
+    return values from extract_audio_to_wav_bytes() -- the `wave` module
+    handles the hand-rolled int24 header from _write_wav_int24() the same
+    as any other standard PCM WAV, since it reads generically by
+    sample-width rather than special-casing bit depths."""
+    with wave.open(io.BytesIO(wav_bytes)) as wf:
+        n_channels = wf.getnchannels()
+        framerate = wf.getframerate()
+        n_frames = wf.getnframes()
+        sampwidth = wf.getsampwidth()
+    return {
+        "duration_seconds": (n_frames / framerate) if framerate else 0.0,
+        "sample_rate": framerate,
+        "channels": n_channels,
+        "bit_depth": sampwidth * 8,
+    }
+
+
+def _completion_stats(start_time, frame_count, output_bytes_len, output_path, wav_bytes=None):
+    """Build the stats payload shown in the frontend's completion popup.
+
+    *output_path* is the save destination if the native Save panel was
+    used, else None (meaning the result was downloaded/held in memory).
+    *wav_bytes*, if given, contributes duration/sample-rate/channels/
+    bit-depth read from the WAV header (video exports that don't expose
+    the intermediate WAV -- e.g. read from a temp file already written to
+    disk -- can omit this and the audio_* fields are simply left out).
+    """
+    elapsed = max(time.time() - start_time, 1e-9)  # guard divide-by-zero for near-instant jobs
+    stats = {
+        "elapsed_seconds": elapsed,
+        "frame_count": frame_count,
+        "fps": frame_count / elapsed,
+        "output_bytes": output_bytes_len,
+        "output_path": output_path,
+    }
+    if wav_bytes is not None:
+        stats.update(_wav_audio_stats(wav_bytes))
+    return stats
 
 
 def _respond_with_result(data, filename, media_type, save_path):
@@ -672,17 +883,65 @@ _ROTATE_FILTERS = {
 _EVEN_DIMS_FILTER = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
 
-def _run_subprocess_cancellable(cmd, cancel_event):
+def _run_subprocess_cancellable(cmd, cancel_event, progress_callback=None, total_duration_seconds=None):
     """subprocess.run(cmd, check=True, capture_output=True) that can be
     interrupted mid-flight: polls the process with a short timeout instead
     of blocking uninterruptibly on a single call, so *cancel_event* being
     set is noticed within ~0.3s and the process is terminated (falling
     back to kill() if it doesn't exit promptly) rather than run to
-    completion regardless of a cancel request."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    completion regardless of a cancel request.
+
+    If *progress_callback* and *total_duration_seconds* are given, *cmd* is
+    expected to include `-progress pipe:1` (see _mux_video_source() /
+    _render_image_sequence()) -- its machine-readable `out_time=` lines on
+    stdout are parsed and reported via progress_callback(elapsed_seconds,
+    total_duration_seconds), the same (current, total) contract used
+    everywhere else in this app. Reading `out_time=` (an "HH:MM:SS.ffffff"
+    string) rather than `out_time_ms=` deliberately sidesteps a
+    long-standing ffmpeg quirk where out_time_ms's actual unit has varied
+    across versions (it's genuinely microseconds despite the name, on most
+    but not all builds) -- out_time is unambiguous.
+
+    stdout/stderr are now drained continuously by background threads
+    (rather than buffered until process exit via communicate()) so a
+    long-running mux/render can't fill either pipe's OS buffer and
+    deadlock ffmpeg while this function is busy polling for cancellation.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stderr_lines = []
+
+    def _drain_stderr():
+        try:
+            for line in proc.stderr:
+                stderr_lines.append(line)
+        except ValueError:
+            pass  # pipe closed out from under us (process killed) -- fine, nothing left to read
+
+    def _drain_stdout():
+        try:
+            for line in proc.stdout:
+                if progress_callback is None or not total_duration_seconds:
+                    continue
+                line = line.strip()
+                if not line.startswith("out_time="):
+                    continue
+                try:
+                    h, m, s = line[len("out_time="):].split(":")
+                    elapsed = int(h) * 3600 + int(m) * 60 + float(s)
+                except ValueError:
+                    continue
+                progress_callback(min(elapsed, total_duration_seconds), total_duration_seconds)
+        except ValueError:
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
+    stderr_thread.start()
+    stdout_thread.start()
+
     while True:
         try:
-            stdout, stderr = proc.communicate(timeout=0.3)
+            proc.wait(timeout=0.3)
             break
         except subprocess.TimeoutExpired:
             if cancel_event is not None and cancel_event.is_set():
@@ -692,13 +951,20 @@ def _run_subprocess_cancellable(cmd, cancel_event):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
+                stdout_thread.join(timeout=2)
+                stderr_thread.join(timeout=2)
                 raise decoder.ExtractionCancelled()
+
+    stdout_thread.join(timeout=2)
+    stderr_thread.join(timeout=2)
+    stderr = "".join(stderr_lines).encode()
     if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
-    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=b"", stderr=stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, b"", stderr)
 
 
-def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_frame, cancel_event=None):
+def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_frame,
+                       cancel_event=None, progress_callback=None):
     """Mux extracted WAV audio onto a trimmed copy of the original video (stream-copy video).
 
     The video input is trimmed to [start_frame, end_frame] here. The WAV is
@@ -729,12 +995,24 @@ def _mux_video_source(video_path, wav_path, out_path, fps, start_frame, end_fram
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",
+        # Machine-readable progress on stdout (key=value lines, see
+        # _run_subprocess_cancellable) instead of ffmpeg's normal
+        # human-readable stats banner on stderr.
+        "-progress", "pipe:1", "-nostats",
         out_path,
     ]
-    _run_subprocess_cancellable(cmd, cancel_event)
+    # ffmpeg's out_time tracks encoded *output* duration, which -- with no
+    # -shortest -- runs past `duration` (the trimmed video length) to match
+    # the WAV's own length (audio_offset padding makes it longer, see this
+    # function's docstring). Use the WAV's real duration as the progress
+    # total so the percentage doesn't hit 100% before muxing actually ends.
+    with wave.open(wav_path) as wf:
+        total_duration = (wf.getnframes() / wf.getframerate()) if wf.getframerate() else duration
+    _run_subprocess_cancellable(cmd, cancel_event, progress_callback, total_duration)
 
 
-def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame, end_frame, tmpdir, cancel_event=None):
+def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame, end_frame, tmpdir,
+                            cancel_event=None, progress_callback=None):
     """Build a concat-demuxer list from the full original scan frames and render to MP4.
 
     The picture track spans exactly [start_frame, end_frame]. The WAV is
@@ -780,9 +1058,17 @@ def _render_image_sequence(source, wav_path, out_path, fps, rotate, start_frame,
         "-c:a", "aac",
         "-b:a", "192k",
         "-movflags", "+faststart",
+        # See _mux_video_source()'s matching flags for why: machine-readable
+        # progress on stdout instead of ffmpeg's stats banner on stderr.
+        "-progress", "pipe:1", "-nostats",
         out_path,
     ]
-    _run_subprocess_cancellable(cmd, cancel_event)
+    # Same reasoning as _mux_video_source(): use the WAV's own (longer, due
+    # to audio_offset padding) duration as the progress total rather than
+    # the picture track's shorter duration.
+    with wave.open(wav_path) as wf:
+        total_duration = (wf.getnframes() / wf.getframerate()) if wf.getframerate() else (end_frame - start_frame + 1) / fps
+    _run_subprocess_cancellable(cmd, cancel_event, progress_callback, total_duration)
 
 
 
