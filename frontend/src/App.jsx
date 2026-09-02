@@ -165,6 +165,43 @@ function timecodeToFrames(text, fps) {
   return (hh * 3600 + mm * 60 + ss) * fpsInt + ff
 }
 
+// Human-readable wall-clock duration for the completion popup, e.g.
+// "2m 14s" or "0.8s" for sub-minute jobs (fractional seconds matter more
+// there than for a multi-minute job).
+function formatElapsed(seconds) {
+  if (!Number.isFinite(seconds)) return '—'
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 2 : 1)}s`
+  const totalSecs = Math.round(seconds)
+  const hh = Math.floor(totalSecs / 3600)
+  const mm = Math.floor((totalSecs % 3600) / 60)
+  const ss = totalSecs % 60
+  return hh > 0 ? `${hh}h ${mm}m ${ss}s` : `${mm}m ${ss}s`
+}
+
+// Clock-style "M:SS" (or "H:MM:SS") duration for the resulting media, as
+// opposed to formatElapsed's wall-clock-processing-time phrasing.
+function formatMediaDuration(seconds) {
+  if (!Number.isFinite(seconds)) return '—'
+  const totalSecs = Math.round(seconds)
+  const hh = Math.floor(totalSecs / 3600)
+  const mm = Math.floor((totalSecs % 3600) / 60)
+  const ss = totalSecs % 60
+  const pad = n => String(n).padStart(2, '0')
+  return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}` : `${mm}:${pad(ss)}`
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '—'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
 function App() {
   // Project state
   const [loaded, setLoaded] = useState(false)
@@ -200,6 +237,10 @@ function App() {
   const [hpf, setHpf] = useState(40.0)
   const [lpf, setLpf] = useState(13500.0)
   const [overlap, setOverlap] = useState(0.05)
+  // 'auto' | 'locked' -- shown to the user as "Variable" / "Single Frame".
+  const [overlapMode, setOverlapMode] = useState('auto')
+  const [lockedOffset, setLockedOffset] = useState(0) // absolute rows; 0 = never locked
+  const [lockedFromFrame, setLockedFromFrame] = useState(null) // frameIndex the lock was captured from
   const [audioOffset, setAudioOffset] = useState(21)
   const [soundtrackColor, setSoundtrackColor] = useState('B&W')
   const [reverse, setReverse] = useState(false)
@@ -225,6 +266,11 @@ function App() {
   const [exportingVideo, setExportingVideo] = useState(false)
   const [exportVideoStatus, setExportVideoStatus] = useState('')
   const [exportVideoProgress, setExportVideoProgress] = useState(null)
+  // Populated from the job's final SSE message (data.stats) on successful
+  // completion only (not on cancel/error) -- drives the completion popup.
+  // { title, filename, elapsed_seconds, frame_count, fps, output_bytes,
+  //   output_path, duration_seconds?, sample_rate?, channels?, bit_depth? }
+  const [completionStats, setCompletionStats] = useState(null)
   const [pickingDmin, setPickingDmin] = useState(false)
   const [dminPickPoint, setDminPickPoint] = useState(null)
   const [hoverZoom, setHoverZoom] = useState(null)
@@ -284,6 +330,9 @@ function App() {
         setHpf(saved.hpf ?? 40.0)
         setLpf(saved.lpf ?? 13500.0)
         setOverlap(saved.overlap ?? 0.05)
+        setOverlapMode(saved.overlapMode === 'locked' ? 'locked' : 'auto')
+        setLockedOffset(Number(saved.lockedOffset ?? 0))
+        setLockedFromFrame(typeof saved.lockedFromFrame === 'number' ? saved.lockedFromFrame : null)
         setAudioOffset(saved.audioOffset ?? 21)
         setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
         setReverse(saved.reverse ?? false)
@@ -344,7 +393,7 @@ function App() {
       cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
-      fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
+      fps, sampleRate, bitDepth, hpf, lpf, overlap, overlapMode, lockedOffset, lockedFromFrame, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame,
       showOverlapPreview,
@@ -352,7 +401,7 @@ function App() {
   }, [loaded, inputDir, cropTop, trackHeight, cropLeft, cropRight,
       rotate, negative,
       dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate,
-      fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
+      fps, sampleRate, bitDepth, hpf, lpf, overlap, overlapMode, lockedOffset, lockedFromFrame, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides,
       showZoom, zoomLevel,
       startFrame, endFrame,
       showOverlapPreview])
@@ -525,6 +574,9 @@ function App() {
         const p = new URLSearchParams(overlapPreviewParams)
         p.set('stereo', stereo)
         p.set('channel_order', channelOrder)
+        if (overlapMode === 'locked' && lockedOffset > 0) {
+          p.set('forced_offset', lockedOffset)
+        }
         return `${API}/api/frame/${frameIndex}/overlap-waveform?${p.toString()}`
       })()
     : null
@@ -557,6 +609,9 @@ function App() {
         hpf,
         lpf,
         overlap,
+        overlapMode,
+        lockedOffset,
+        lockedFromFrame,
         audioOffset,
         soundtrackColor,
         reverse,
@@ -593,7 +648,7 @@ function App() {
     a.click()
     URL.revokeObjectURL(url)
     setStatus(`Saved settings file: ${filename}`)
-  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame, showOverlapPreview])
+  }, [hasNativeBrowse, inputDir, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, overlapMode, lockedOffset, lockedFromFrame, audioOffset, soundtrackColor, reverse, stereo, channelOrder, showStereoGuides, showZoom, zoomLevel, startFrame, endFrame, showOverlapPreview])
 
   // Shared by handleImportSettingsFile (settings-only import) and
   // handleLoadProjectFile (.o2d project load) so both apply the same
@@ -617,6 +672,9 @@ function App() {
     setHpf(Number(saved.hpf ?? 40.0))
     setLpf(Number(saved.lpf ?? 13500.0))
     setOverlap(Number(saved.overlap ?? 0.05))
+    setOverlapMode(saved.overlapMode === 'locked' ? 'locked' : 'auto')
+    setLockedOffset(Number(saved.lockedOffset ?? 0))
+    setLockedFromFrame(typeof saved.lockedFromFrame === 'number' ? saved.lockedFromFrame : null)
     setAudioOffset(Number(saved.audioOffset ?? 21))
     setSoundtrackColor(saved.soundtrackColor ?? 'B&W')
     setReverse(Boolean(saved.reverse ?? false))
@@ -906,7 +964,7 @@ function App() {
           binary_lb: binaryLb,
           binary_ub: binaryUb,
           integrate,
-          fps, sample_rate: sampleRate, bit_depth: bitDepth, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
+          fps, sample_rate: sampleRate, bit_depth: bitDepth, hpf, lpf, overlap, overlap_mode: overlapMode, locked_offset: lockedOffset, audio_offset: audioOffset, reverse,
           soundtrack_color: soundtrackColor,
           stereo,
           channel_order: channelOrder,
@@ -947,7 +1005,7 @@ function App() {
               if (!resolved) {
                 resolved = true
                 if (data.error) reject(new Error(data.error))
-                else resolve({ cancelled: !!data.cancelled })
+                else resolve({ cancelled: !!data.cancelled, stats: data.stats })
               }
             }
           }
@@ -1002,6 +1060,9 @@ function App() {
         URL.revokeObjectURL(url)
         setStatus('Extraction complete — WAV downloaded')
       }
+      if (extractResult.stats) {
+        setCompletionStats({ title: 'Audio Extraction Complete', filename: 'output.wav', ...extractResult.stats })
+      }
     } catch (e) {
       setStatus(`Error: ${e.message}`)
     } finally {
@@ -1009,7 +1070,7 @@ function App() {
       setCancelRequested(false)
       setExtractProgress(null)
     }
-  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, startFrame, endFrame, numFrames])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, overlapMode, lockedOffset, audioOffset, soundtrackColor, reverse, stereo, channelOrder, startFrame, endFrame, numFrames])
 
   const handleCancelExtract = useCallback(async () => {
     setCancelRequested(true)
@@ -1059,7 +1120,7 @@ function App() {
           binary_lb: binaryLb,
           binary_ub: binaryUb,
           integrate,
-          fps, sample_rate: sampleRate, bit_depth: bitDepth, hpf, lpf, overlap, audio_offset: audioOffset, reverse,
+          fps, sample_rate: sampleRate, bit_depth: bitDepth, hpf, lpf, overlap, overlap_mode: overlapMode, locked_offset: lockedOffset, audio_offset: audioOffset, reverse,
           soundtrack_color: soundtrackColor,
           stereo,
           channel_order: channelOrder,
@@ -1082,21 +1143,28 @@ function App() {
             const data = JSON.parse(ev.data)
             setExportVideoProgress(data)
 
-            // Only the "Extracting audio" phase reports real per-frame
-            // progress (current/total) — the ffmpeg mux/render phase that
-            // follows has none (server.py zeroes both once that starts),
-            // so the frame viewer simply stays parked whichever frame
-            // extraction last landed on during that phase.
+            // "Extracting audio" reports frame counts (current/total are
+            // frame indices, so the frame viewer can scrub along). "Muxing
+            // video"/"Rendering video" now also report real progress (see
+            // server.py's ffmpeg -progress parsing), but in seconds of
+            // output media, not frames — a percentage is still meaningful,
+            // but it must NOT drive setFrameIndex, or the viewer would jump
+            // to a nonsense "frame" derived from an elapsed-seconds count.
             if (data.total > 0 && data.current < data.total) {
-              const completed = Math.max(0, Math.min(data.current, data.total))
-              const currentFrame = reverse
-                ? Math.max(rangeStart, rangeEnd - Math.max(completed - 1, 0))
-                : Math.min(rangeEnd, rangeStart + Math.max(completed - 1, 0))
               const pct = Math.round((data.current / data.total) * 100)
-              const text = `${data.phase}: ${data.current} / ${data.total} (${pct}%)`
+              const isFrameCount = data.phase === 'Extracting audio'
+              const text = isFrameCount
+                ? `${data.phase}: ${data.current} / ${data.total} (${pct}%)`
+                : `${data.phase}: ${pct}%`
               setExportVideoStatus(text)
               setStatus(text)
-              setFrameIndex(currentFrame)
+              if (isFrameCount) {
+                const completed = Math.max(0, Math.min(data.current, data.total))
+                const currentFrame = reverse
+                  ? Math.max(rangeStart, rangeEnd - Math.max(completed - 1, 0))
+                  : Math.min(rangeEnd, rangeStart + Math.max(completed - 1, 0))
+                setFrameIndex(currentFrame)
+              }
             } else if (data.phase && !data.done) {
               setExportVideoStatus(data.phase)
               setStatus(data.phase)
@@ -1106,7 +1174,7 @@ function App() {
               if (!resolved) {
                 resolved = true
                 if (data.error) reject(new Error(data.error))
-                else resolve({ cancelled: !!data.cancelled })
+                else resolve({ cancelled: !!data.cancelled, stats: data.stats })
               }
             }
           }
@@ -1159,6 +1227,9 @@ function App() {
         URL.revokeObjectURL(url)
         setStatus('Video export complete — MP4 downloaded')
       }
+      if (exportResult.stats) {
+        setCompletionStats({ title: 'Video Export Complete', filename: 'output.mp4', ...exportResult.stats })
+      }
     } catch (e) {
       setStatus(`Error: ${e.message}`)
       setExportVideoStatus(`Error: ${e.message}`)
@@ -1167,7 +1238,7 @@ function App() {
       setCancelRequested(false)
       setExportVideoProgress(null)
     }
-  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, audioOffset, soundtrackColor, reverse, stereo, channelOrder, startFrame, endFrame, numFrames])
+  }, [hasNativeBrowse, cropTop, trackHeight, cropLeft, cropRight, rotate, negative, dminValue, dminHeadroom, binaryMask, binaryLb, binaryUb, integrate, fps, sampleRate, bitDepth, hpf, lpf, overlap, overlapMode, lockedOffset, audioOffset, soundtrackColor, reverse, stereo, channelOrder, startFrame, endFrame, numFrames])
 
   const handleCancelExportVideo = useCallback(async () => {
     setCancelRequested(true)
@@ -1287,6 +1358,42 @@ function App() {
                 </div>
                 <SliderInput label="Zoom ×" value={zoomLevel} onChange={setZoomLevel} min={2} max={12} step={0.5} />
                 <SliderInput label="Overlap/Jitter" value={overlap} onChange={setOverlap} min={0} max={0.5} step={0.01} />
+                <div className="control-row overlap-mode-row">
+                  <label title="Controls how consecutive frames' audio is aligned/cross-faded together at each join.">Overlap Mode</label>
+                  <div className="mode-toggle" role="radiogroup" aria-label="Overlap mode">
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={overlapMode === 'auto'}
+                      className={overlapMode === 'auto' ? 'active' : undefined}
+                      onClick={() => setOverlapMode('auto')}
+                      title="Variable: automatically searches for the best alignment independently for every frame pair. Adapts to jitter/drift across the reel. Little slower, potential for more audio artifacts."
+                    >
+                      Variable
+                    </button>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={overlapMode === 'locked'}
+                      className={overlapMode === 'locked' ? 'active' : undefined}
+                      onClick={() => setOverlapMode('locked')}
+                      title="Single Frame: reuses one fixed offset — measured once from a single frame pair via the Splice Preview panel's 'Lock this offset' button. Similar to AEO-Light's 'Lock Height' setting; best when frame spacing is consistent across the reel."
+                    >
+                      Single Frame
+                    </button>
+                  </div>
+                </div>
+                {overlapMode === 'locked' && (
+                  lockedOffset > 0 ? (
+                    <p className="hint">
+                      Locked to frame {lockedFromFrame != null ? lockedFromFrame + 1 : '?'} → {lockedFromFrame != null ? lockedFromFrame + 2 : '?'} ({lockedOffset} rows).
+                    </p>
+                  ) : (
+                    <p className="hint overlap-locked-unset">
+                      No offset locked yet — export will use Variable (per-pair) alignment until you lock one from the Splice Preview panel.
+                    </p>
+                  )
+                )}
               </div>
             </section>
           )}
@@ -1381,18 +1488,19 @@ function App() {
                   <input type="checkbox" id="stereo" checked={stereo} onChange={e => setStereo(e.target.checked)} />
                   <label htmlFor="stereo">Stereo (split L/R)</label>
                 </div>
-                <div className="control-row">
-                  <label htmlFor="channel-order">Channel Order</label>
-                  <select
-                    id="channel-order"
-                    value={channelOrder}
-                    onChange={e => setChannelOrder(e.target.value)}
-                    disabled={!stereo}
-                  >
-                    <option value="LR">L, R (default)</option>
-                    <option value="RL">R, L (flipped)</option>
-                  </select>
-                </div>
+                {stereo && (
+                  <div className="control-row">
+                    <label htmlFor="channel-order">Channel Order</label>
+                    <select
+                      id="channel-order"
+                      value={channelOrder}
+                      onChange={e => setChannelOrder(e.target.value)}
+                    >
+                      <option value="LR">L, R (default)</option>
+                      <option value="RL">R, L (flipped)</option>
+                    </select>
+                  </div>
+                )}
                 <div className="checkbox-row">
                   <input type="checkbox" id="stereo-guides" checked={showStereoGuides} onChange={e => setShowStereoGuides(e.target.checked)} />
                   <label htmlFor="stereo-guides">Show Centerlines</label>
@@ -1401,13 +1509,14 @@ function App() {
             </section>
           )}
 
-          {/* Start/End frame — always visible, shared across all panels */}
-          <div className="control-group">
-            <FrameTimecodeInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} fps={fps} />
-            <FrameTimecodeInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} fps={fps} />
-          </div>
-
           {/* Export */}
+          {activePanel === 'export' && (
+            <div className="control-group">
+              <FrameTimecodeInput label="Start Frame" value={startFrame} onChange={setStartFrame} min={0} max={numFrames - 1} fps={fps} />
+              <FrameTimecodeInput label="End Frame" value={endFrame} onChange={setEndFrame} min={0} max={numFrames - 1} fps={fps} />
+            </div>
+          )}
+
           {activePanel === 'export' && (
             <section className="extract-section">
               <h3>Export WAV</h3>
@@ -1424,6 +1533,11 @@ function App() {
               <p className="hint" style={{ marginTop: 8 }}>
                 Channel in use: {soundtrackChannelLabel(soundtrackColor)}
               </p>
+              {extracting && (
+                <p className="hint job-status-row" style={{ marginTop: 8 }}>
+                  <Spinner /> {status}
+                </p>
+              )}
               {extracting && extractProgress && extractProgress.total > 0 && (
                 <div className="progress-bar">
                   <div
@@ -1454,7 +1568,9 @@ function App() {
                 )}
               </div>
               {exportingVideo && (
-                <p className="hint" style={{ marginTop: 8 }}>{exportVideoStatus}</p>
+                <p className="hint job-status-row" style={{ marginTop: 8 }}>
+                  <Spinner /> {exportVideoStatus}
+                </p>
               )}
               {exportingVideo && exportVideoProgress && exportVideoProgress.total > 0 && (
                 <div className="progress-bar">
@@ -1730,10 +1846,38 @@ function App() {
                 {overlapWaveform && overlapWaveform.offset > 0 && (
                   <span
                     className="overlap-preview-offset-note"
-                    title="Rows of audio cross-faded between this frame and the next, out of the rows available to search (controlled by the Overlap % setting). A small number here isn't necessarily bad — it often means the two frames already lined up well and needed little blending."
+                    title={overlapWaveform.forced
+                      ? "Rows of audio cross-faded between this frame and the next, using the locked offset (clamped to the rows available here, controlled by the Overlap % setting)."
+                      : "Rows of audio cross-faded between this frame and the next, out of the rows available to search (controlled by the Overlap % setting). A small number here isn't necessarily bad — it often means the two frames already lined up well and needed little blending."}
                   >
-                    {` — overlap ${overlapWaveform.offset} of ${overlapWaveform.max_overlap} rows searched`}
+                    {overlapWaveform.forced
+                      ? ` — overlap ${overlapWaveform.offset} of ${overlapWaveform.max_overlap} rows applied${
+                          lockedFromFrame != null
+                            ? ` (locked from frame ${lockedFromFrame + 1} → ${lockedFromFrame + 2})`
+                            : ''
+                        }`
+                      : ` — overlap ${overlapWaveform.offset} of ${overlapWaveform.max_overlap} rows searched`}
                   </span>
+                )}
+                {overlapWaveform && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-small overlap-lock-btn"
+                    onClick={() => { setOverlapMode('locked'); setLockedOffset(overlapWaveform.offset); setLockedFromFrame(frameIndex) }}
+                    title="Lock this pair's computed offset as the single fixed offset used for every frame pair during export (Single Frame mode)."
+                  >
+                    {lockedOffset > 0 ? 'Re-lock to this pair' : 'Lock this offset'}
+                  </button>
+                )}
+                {lockedOffset > 0 && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-small overlap-clear-btn"
+                    onClick={() => { setLockedOffset(0); setLockedFromFrame(null) }}
+                    title="Clear the locked offset — export falls back to Variable (per-pair) alignment until a new offset is locked."
+                  >
+                    Clear
+                  </button>
                 )}
               </div>
               {overlapWaveformError ? (
@@ -1783,16 +1927,19 @@ function App() {
                           <OverlapWaveformChart
                             label="Left channel" data={overlapWaveform.channels.left}
                             offset={overlapWaveform.offset} maxOverlap={overlapWaveform.max_overlap}
+                            locked={!!overlapWaveform.forced}
                           />
                           <OverlapWaveformChart
                             label="Right channel" data={overlapWaveform.channels.right}
                             offset={overlapWaveform.offset} maxOverlap={overlapWaveform.max_overlap}
+                            locked={!!overlapWaveform.forced}
                           />
                         </>
                       ) : (
                         <OverlapWaveformChart
                           label="Mono" data={overlapWaveform.channels.mono}
                           offset={overlapWaveform.offset} maxOverlap={overlapWaveform.max_overlap}
+                          locked={!!overlapWaveform.forced}
                         />
                       )}
                     </div>
@@ -1806,9 +1953,13 @@ function App() {
 
       {/* Status bar */}
       <div className="status-bar">
-        <span>{status}</span>
+        <span className="job-status-row">
+          {(extracting || exportingVideo) && <Spinner />} {status}
+        </span>
         <a href="https://optical2digital.org" target="_blank" rel="noopener noreferrer">optical2digital.org</a>
       </div>
+
+      <CompletionStatsModal stats={completionStats} onClose={() => setCompletionStats(null)} />
     </div>
   )
 }
@@ -1825,11 +1976,68 @@ function alignmentErrorLevel(errorPct) {
   return 'bad'
 }
 
+/** Small rotating-ring spinner shown next to the status text while any
+ *  background job (extraction/export) is running — including phases with
+ *  no numeric progress of their own (offset computation, resampling,
+ *  filtering), where it's the only "still working" feedback the user gets. */
+function Spinner() {
+  return <span className="spinner" role="status" aria-label="Working" />
+}
+
+/** Non-native completion popup (NOT window.alert) shown once a job
+ *  finishes successfully, summarizing stats the user might want to know:
+ *  processing time, throughput, and where the result ended up. Dismissed
+ *  via the close button or a backdrop click; does not block anything else
+ *  in the UI while open. */
+function CompletionStatsModal({ stats, onClose }) {
+  if (!stats) return null
+  const hasAudioStats = stats.duration_seconds != null
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-panel" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={stats.title}>
+        <h3>{stats.title}</h3>
+        <dl className="stats-grid">
+          <dt>Total time</dt>
+          <dd>{formatElapsed(stats.elapsed_seconds)}</dd>
+
+          <dt>Frames processed</dt>
+          <dd>{stats.frame_count?.toLocaleString()}</dd>
+
+          <dt>Average speed</dt>
+          <dd>{stats.fps?.toFixed(1)} frames/sec</dd>
+
+          {hasAudioStats && (
+            <>
+              <dt>Audio duration</dt>
+              <dd>{formatMediaDuration(stats.duration_seconds)}</dd>
+
+              <dt>Audio format</dt>
+              <dd>
+                {stats.sample_rate?.toLocaleString()} Hz, {stats.bit_depth}-bit
+                {stats.channels === 2 ? ', stereo' : ', mono'}
+              </dd>
+            </>
+          )}
+
+          <dt>File size</dt>
+          <dd>{formatBytes(stats.output_bytes)}</dd>
+
+          <dt>Saved to</dt>
+          <dd className="stats-path">{stats.output_path || `Downloaded as ${stats.filename}`}</dd>
+        </dl>
+        <div className="button-row">
+          <button className="btn-primary" onClick={onClose}>OK</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** Plots the overlap join between two frames' audio as three overlaid
  *  polylines — the current frame's tail, the next frame's head, and the
  *  actual cross-faded stitched output — so a bad splice (the prev/next
  *  lines diverging inside the shaded overlap band) is visible at a glance. */
-function OverlapWaveformChart({ label, data, offset, maxOverlap }) {
+function OverlapWaveformChart({ label, data, offset, maxOverlap, locked }) {
   if (!data || maxOverlap <= 0) return null
 
   const width = 400
@@ -1894,7 +2102,7 @@ function OverlapWaveformChart({ label, data, offset, maxOverlap }) {
         {label} — alignment error{' '}
         <span
           className={`alignment-error alignment-error-${errorLevel}`}
-          title={`Mean brightness mismatch between the current frame's tail and the next frame's head, over the ${offset}-row cross-fade window, as a % of full-scale amplitude. Below ${ERROR_GOOD_PCT}% is a clean, inaudible splice; ${ERROR_GOOD_PCT}–${ERROR_WARN_PCT}% may be faintly audible; above ${ERROR_WARN_PCT}% is likely an audible pop or click.`}
+          title={`Mean brightness mismatch between the current frame's tail and the next frame's head, over the ${offset}-row ${locked ? 'locked' : 'cross-fade'} window, as a % of full-scale amplitude. Below ${ERROR_GOOD_PCT}% is a clean, inaudible splice; ${ERROR_GOOD_PCT}–${ERROR_WARN_PCT}% may be faintly audible; above ${ERROR_WARN_PCT}% is likely an audible pop or click.`}
         >
           {errorPct.toFixed(1)}%
         </span>
@@ -1902,7 +2110,9 @@ function OverlapWaveformChart({ label, data, offset, maxOverlap }) {
       <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="overlap-waveform-svg">
         {offset > 0 && (
           <rect x={bandX1} y={0} width={bandX2 - bandX1} height={height} className="overlap-waveform-band">
-            <title>{`Cross-fade window — the ${offset} of ${maxOverlap} searched rows the algorithm blends between the two frames to make the join seamless. Outside this band the stitched line is just the raw signal.`}</title>
+            <title>{locked
+              ? `Cross-fade window — the ${offset} of ${maxOverlap} rows from the locked offset that get blended between the two frames. Outside this band the stitched line is just the raw signal.`
+              : `Cross-fade window — the ${offset} of ${maxOverlap} searched rows the algorithm blends between the two frames to make the join seamless. Outside this band the stitched line is just the raw signal.`}</title>
           </rect>
         )}
         <line x1={joinX} y1={0} x2={joinX} y2={height} className="overlap-waveform-join">
