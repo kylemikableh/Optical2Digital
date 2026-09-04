@@ -63,15 +63,7 @@ import webview
 from webview import FileDialog
 
 import server as server_module
-
-try:
-    # Generated at build time by packaging/optical2digital.spec from the
-    # APP_VERSION env var (itself derived from the release git tag — see
-    # .github/workflows/release.yml). Not present for dev runs
-    # (`python packaging/launcher.py` outside of PyInstaller).
-    from app_version import APP_VERSION
-except ImportError:
-    APP_VERSION = "0.0.0-dev"
+from server import APP_VERSION
 
 HOST = "127.0.0.1"
 PORT = 8000

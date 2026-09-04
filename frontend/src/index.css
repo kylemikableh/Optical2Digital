@@ -561,6 +561,38 @@ select {
 .status-bar a:hover {
   text-decoration: underline;
 }
+.status-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.status-update {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.status-update::before {
+  content: '●';
+  font-size: 8px;
+}
+.status-update a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.status-update-dismiss {
+  background: none;
+  border: none;
+  color: var(--accent);
+  opacity: 0.7;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0 0 4px;
+}
+.status-update-dismiss:hover { opacity: 1; }
 
 .tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--border); }
 .tab-bar button {
