@@ -23,6 +23,11 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 const API = ''  // proxied by vite in dev
 
 const SETTINGS_PREFIX = 'optical2digital:'
+// Not a real per-project settings path, but saveSettings()/loadSettings()
+// already do exactly what's needed here (a single JSON-able value keyed
+// under SETTINGS_PREFIX in localStorage) -- no need for bespoke storage
+// code just to remember which update banner the user last dismissed.
+const DISMISSED_UPDATE_KEY = '__dismissed_update_version__'
 
 /** Debounce URL changes and fetch images via AbortController so rapid
  *  scrubbing / slider drags don't flood the server with stale requests. */
@@ -237,7 +242,7 @@ function App() {
   const [hpf, setHpf] = useState(40.0)
   const [lpf, setLpf] = useState(13500.0)
   const [overlap, setOverlap] = useState(0.05)
-  // 'auto' | 'locked' -- shown to the user as "Variable" / "Single Frame".
+  // 'auto' | 'locked' -- shown to the user as "Auto" / "Single Frame".
   const [overlapMode, setOverlapMode] = useState('auto')
   const [lockedOffset, setLockedOffset] = useState(0) // absolute rows; 0 = never locked
   const [lockedFromFrame, setLockedFromFrame] = useState(null) // frameIndex the lock was captured from
@@ -289,6 +294,25 @@ function App() {
     window.addEventListener('pywebviewready', onReady)
     return () => window.removeEventListener('pywebviewready', onReady)
   }, [])
+
+  // --- Check for a newer release on startup (best-effort, never blocks
+  // the app) ---
+  const [updateInfo, setUpdateInfo] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    fetch(`${API}/api/update-check`)
+      .then(res => res.json())
+      .then(data => {
+        if (!cancelled && data?.update_available) setUpdateInfo(data)
+      })
+      .catch(() => {}) // offline/GitHub-unreachable — silently skip the banner
+    return () => { cancelled = true }
+  }, [])
+  const updateDismissed = updateInfo && loadSettings(DISMISSED_UPDATE_KEY) === updateInfo.latest_version
+  const dismissUpdate = () => {
+    saveSettings(DISMISSED_UPDATE_KEY, updateInfo.latest_version)
+    setUpdateInfo(null)
+  }
 
   // --- Load project ---
   const loadProject = useCallback(async (path = inputDir) => {
@@ -1329,6 +1353,7 @@ function App() {
               aria-checked={integrate}
               className={integrate ? 'active' : undefined}
               onClick={() => setIntegrate(true)}
+              title="Sums raw channel transmittance across each row (SVA integration) without Dmin normalization or binary masking. The default mode — best for clean, well-exposed tracks with anti-aliased edges. Higher fidelity, more prone to dirt/dust and scratches."
             >
               Average Pixel Value
             </button>
@@ -1338,6 +1363,7 @@ function App() {
               aria-checked={!integrate}
               className={!integrate ? 'active' : undefined}
               onClick={() => setIntegrate(false)}
+              title="Applies Dmin normalization, then optionally a binary threshold mask (see Binary LB/UB) to force each pixel fully black or white. Useful when the default Average mode struggles with a damaged or noisy track, slightly lower fidelity but more robust to dirt/dust and scratches."
             >
               Binary Pixel Value
             </button>
@@ -1367,9 +1393,9 @@ function App() {
                       aria-checked={overlapMode === 'auto'}
                       className={overlapMode === 'auto' ? 'active' : undefined}
                       onClick={() => setOverlapMode('auto')}
-                      title="Variable: automatically searches for the best alignment independently for every frame pair. Adapts to jitter/drift across the reel. Little slower, potential for more audio artifacts."
+                      title="Auto: automatically computes one consistent offset for the whole reel from the frame pairs it's most confident about, then reuses it for every join. Similar to AEO-Light's 'Lock Height' setting, computed for you instead of picked by hand."
                     >
-                      Variable
+                      Auto
                     </button>
                     <button
                       type="button"
@@ -1377,7 +1403,7 @@ function App() {
                       aria-checked={overlapMode === 'locked'}
                       className={overlapMode === 'locked' ? 'active' : undefined}
                       onClick={() => setOverlapMode('locked')}
-                      title="Single Frame: reuses one fixed offset — measured once from a single frame pair via the Splice Preview panel's 'Lock this offset' button. Similar to AEO-Light's 'Lock Height' setting; best when frame spacing is consistent across the reel."
+                      title="Single Frame: reuses one fixed offset — measured once from a single frame pair via the Splice Preview panel's 'Lock this offset' button. Use this to override the automatic offset by hand."
                     >
                       Single Frame
                     </button>
@@ -1390,7 +1416,7 @@ function App() {
                     </p>
                   ) : (
                     <p className="hint overlap-locked-unset">
-                      No offset locked yet — export will use Variable (per-pair) alignment until you lock one from the Splice Preview panel.
+                      No offset locked yet — export will use the automatic reel-wide offset until you lock one from the Splice Preview panel.
                     </p>
                   )
                 )}
@@ -1874,7 +1900,7 @@ function App() {
                     type="button"
                     className="btn-secondary btn-small overlap-clear-btn"
                     onClick={() => { setLockedOffset(0); setLockedFromFrame(null) }}
-                    title="Clear the locked offset — export falls back to Variable (per-pair) alignment until a new offset is locked."
+                    title="Clear the locked offset — export falls back to the automatic reel-wide offset until a new offset is locked."
                   >
                     Clear
                   </button>
@@ -1956,7 +1982,24 @@ function App() {
         <span className="job-status-row">
           {(extracting || exportingVideo) && <Spinner />} {status}
         </span>
-        <a href="https://optical2digital.org" target="_blank" rel="noopener noreferrer">optical2digital.org</a>
+        <span className="status-bar-right">
+          {updateInfo && !updateDismissed && (
+            <span className="status-update">
+              Optical2Digital {updateInfo.latest_version} available
+              {' — '}
+              <a href={updateInfo.latest_url} target="_blank" rel="noopener noreferrer">Download</a>
+              <button
+                type="button"
+                className="status-update-dismiss"
+                aria-label="Dismiss update notice"
+                onClick={dismissUpdate}
+              >
+                ×
+              </button>
+            </span>
+          )}
+          <a href="https://optical2digital.org" target="_blank" rel="noopener noreferrer">optical2digital.org</a>
+        </span>
       </div>
 
       <CompletionStatsModal stats={completionStats} onClose={() => setCompletionStats(null)} />

@@ -38,6 +38,7 @@ import queue
 import struct
 import sys
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -122,6 +123,19 @@ def parse_args():
     parser.add_argument(
         "--overlap", type=float, default=0.25,
         help="Fraction of frame height to search for overlap between consecutive frames (0 = disabled, 0.25 = 25%%)",
+    )
+    parser.add_argument(
+        "--overlap-mode", choices=["auto", "locked"], default="auto",
+        help=(
+            "auto: automatically compute one reel-wide overlap offset (the "
+            "AEO-Light-style 'Lock Height' approach). locked: reuse a "
+            "manually-chosen --locked-offset for every pair instead "
+            "(falls back to auto if --locked-offset is 0)."
+        ),
+    )
+    parser.add_argument(
+        "--locked-offset", type=int, default=0,
+        help="Overlap offset in samples to reuse for every pair when --overlap-mode=locked",
     )
     parser.add_argument(
         "--audio-offset", type=int, default=21,
@@ -346,78 +360,66 @@ def find_best_overlap(prev_samples, curr_samples, max_overlap):
     return best_offset
 
 
-def stitch_with_overlap(frame_audio_list, max_overlap_frac,
-                         progress_callback=None, progress_every=20):
-    """Stitch frame audio arrays with overlap detection and cross-fade blending.
+def compute_robust_overlap_offset(frame_audio_list, max_overlap_frac, min_energy_ratio=0.15):
+    """Automatically determine one reel-wide overlap offset (in samples).
 
-    For each consecutive pair of frames:
-      1. Find the best overlap alignment (minimum absolute difference)
-      2. Cross-fade in the overlap region to avoid clicks
-      3. Concatenate the non-overlapping portions
+    This is the AEO-Light-style "Lock Height" this app computes for the
+    user automatically, instead of requiring a manual Splice Preview pick.
+    It replaces the old approach of running find_best_overlap() fresh for
+    every consecutive pair and trusting each result independently: that
+    approach is purely content-driven with no continuity from one pair to
+    the next, so on quiet/flat passages every candidate offset ties at
+    ~0 error and np.argmin always resolves ties to the smallest offset --
+    silently collapsing to offset=1 regardless of the true physical
+    overlap -- while louder passages can land anywhere up to max_overlap
+    depending on the exact waveform shape. Since the true overlap between
+    consecutive frames is fixed by scanner geometry (frame pitch), not by
+    content, a single reel-wide offset is both more physically correct and
+    far less prone to per-pair noise.
 
-    *progress_callback*, if provided, is called with (current, total) every
-    *progress_every* pairs stitched (and always on the last pair) -- same
-    contract as extract_audio()'s per-frame progress_callback, so callers
-    can drive the same progress UI during this (potentially slow, for long
-    clips) stitching pass as they do during frame processing.
-    """
-    if not frame_audio_list:
-        return np.array([], dtype=np.float64)
-    if len(frame_audio_list) == 1 or max_overlap_frac <= 0:
-        return np.concatenate(frame_audio_list)
+    Runs find_best_overlap()'s sliding search (via
+    _find_best_overlap_with_error()) across every consecutive pair, skips
+    pairs whose overlap-search region is too quiet/flat relative to the
+    reel's overall level to produce a reliable alignment (guarding against
+    exactly the degenerate offset=1 case above), and returns the median
+    offset of the remaining confident pairs.
 
-    frame_len = len(frame_audio_list[0])
-    max_overlap = int(frame_len * max_overlap_frac)
-
-    result = frame_audio_list[0].copy()
-    total_pairs = len(frame_audio_list) - 1
-
-    for i in range(1, len(frame_audio_list)):
-        curr = frame_audio_list[i]
-        overlap = find_best_overlap(result, curr, max_overlap)
-
-        if overlap > 0:
-            # Cross-fade: linear blend in the overlap region
-            fade_out = np.linspace(1.0, 0.0, overlap)
-            fade_in = np.linspace(0.0, 1.0, overlap)
-            blended = result[-overlap:] * fade_out + curr[:overlap] * fade_in
-
-            # Replace the tail of result with the blended region, then append the rest
-            result = np.concatenate([result[:-overlap], blended, curr[overlap:]])
-        else:
-            result = np.concatenate([result, curr])
-
-        if progress_callback and (i % progress_every == 0 or i == total_pairs):
-            progress_callback(i, total_pairs)
-
-    return result
-
-
-def compute_overlap_offsets(frame_audio_list, max_overlap_frac):
-    """Compute the overlap offset for each consecutive frame pair.
-
-    Returns a list of offsets (length = len(frame_audio_list) - 1).
-    Uses the mono signal to determine alignment.
+    Returns 0 if fewer than 2 confident pairs are found reel-wide (e.g. an
+    entirely silent reel) -- callers should treat that as "nothing reliable
+    to lock onto" rather than guessing, and skip overlap trimming entirely.
     """
     if len(frame_audio_list) < 2 or max_overlap_frac <= 0:
-        return [0] * max(0, len(frame_audio_list) - 1)
+        return 0
 
     frame_len = len(frame_audio_list[0])
     max_overlap = int(frame_len * max_overlap_frac)
-    offsets = []
+    if max_overlap < 2:
+        return 0
 
-    # Build running tail for overlap detection
-    prev_tail = frame_audio_list[0].copy()
+    # Reel-wide energy scale to judge "is this pair's overlap region loud
+    # enough to trust its alignment" against, rather than an absolute
+    # threshold that wouldn't generalize across scans/exposures.
+    overall_std = float(np.std(np.concatenate(frame_audio_list)))
+    if overall_std <= 0:
+        return 0
+    energy_floor = overall_std * min_energy_ratio
+
+    candidates = []
     for i in range(1, len(frame_audio_list)):
-        curr = frame_audio_list[i]
-        offset = find_best_overlap(prev_tail, curr, max_overlap)
-        offsets.append(offset)
-        # Advance: the "result" tail after stitching this frame
+        prev, curr = frame_audio_list[i - 1], frame_audio_list[i]
+        search_range = min(max_overlap, len(prev) // 2, len(curr) // 2)
+        if search_range < 2:
+            continue
+        region_std = float(np.std(np.concatenate([prev[-search_range:], curr[:search_range]])))
+        if region_std < energy_floor:
+            continue  # near-silent/flat join -- unreliable, don't vote
+        offset, _ = _find_best_overlap_with_error(prev, curr, max_overlap)
         if offset > 0:
-            prev_tail = curr  # after cross-fade, tail is curr
-        else:
-            prev_tail = curr
-    return offsets
+            candidates.append(offset)
+
+    if len(candidates) < 2:
+        return 0
+    return int(round(float(np.median(candidates))))
 
 
 def build_locked_offsets(frame_audio_list, locked_offset):
@@ -441,20 +443,78 @@ def build_locked_offsets(frame_audio_list, locked_offset):
     return offsets
 
 
+class ProgressThrottle:
+    """Rate-limits a (current, total) progress_callback to roughly one call
+    per *min_interval* seconds of wall-clock time, instead of one call per
+    fixed number of steps (frames/pairs).
+
+    A fixed step count (the old "every 20 frames" approach) reports at a
+    cadence tied to work done, not time elapsed -- so it looks fine on
+    whatever hardware it was tuned on, but a faster machine (or a future
+    speed optimization) blows through those 20-step batches in a fraction
+    of the time, and a slower one dawdles between them. Gating on elapsed
+    time instead means the UI always gets roughly the same number of
+    updates per second regardless of how fast the underlying work runs --
+    slow hardware naturally reports smaller step-count jumps (fewer steps
+    fit in each interval) and fast hardware naturally reports larger ones
+    (more steps fit), with no hardcoded step count to retune.
+
+    Always fires on the very first call (so callers see immediate motion)
+    and on the final call (current >= total, so completion is never
+    swallowed by the timing gate). Thread-safe: multiple worker threads may
+    call the same instance concurrently for distinct positions (see
+    extract_audio()'s thread-pool frame processing).
+    """
+
+    def __init__(self, callback, min_interval=0.1):
+        self._callback = callback
+        self._min_interval = min_interval
+        self._last_time = None
+        self._lock = threading.Lock()
+
+    def reset(self):
+        """Force the next call to fire immediately regardless of elapsed
+        time -- for phase transitions, so a new phase's first report isn't
+        suppressed by how recently the previous phase last reported."""
+        with self._lock:
+            self._last_time = None
+
+    def __call__(self, current, total):
+        if self._callback is None:
+            return
+        now = time.monotonic()
+        with self._lock:
+            due = (
+                self._last_time is None
+                or current >= total
+                or (now - self._last_time) >= self._min_interval
+            )
+            if due:
+                self._last_time = now
+        if due:
+            self._callback(current, total)
+
+
 def apply_overlap_offsets(frame_audio_list, offsets,
-                           progress_callback=None, progress_every=20):
+                           progress_callback=None, min_interval=0.1):
     """Stitch frames using pre-computed overlap offsets with cross-fade blending.
 
-    *progress_callback*/*progress_every*: same contract as
-    stitch_with_overlap() -- used for the stereo path, where offsets are
-    computed once (from the mono mix) and then applied to each channel via
-    this function instead of stitch_with_overlap()'s own offset search.
+    *progress_callback*, if provided, is called with (current, total)
+    roughly every *min_interval* seconds of wall-clock time (always on the
+    first and last pair) via ProgressThrottle -- same contract as
+    extract_audio()'s per-frame progress_callback, so callers can drive the
+    same progress UI during this (potentially slow, for long clips)
+    stitching pass as they do during frame processing.
+    This is the sole stitching path now: offsets are always precomputed
+    (via compute_robust_overlap_offset() or build_locked_offsets()) and
+    applied here identically for mono and each stereo channel.
     """
     if not frame_audio_list:
         return np.array([], dtype=np.float64)
     if len(frame_audio_list) == 1:
         return frame_audio_list[0].copy()
 
+    report = ProgressThrottle(progress_callback, min_interval)
     result = frame_audio_list[0].copy()
     total_pairs = len(frame_audio_list) - 1
     for i in range(1, len(frame_audio_list)):
@@ -467,9 +527,40 @@ def apply_overlap_offsets(frame_audio_list, offsets,
             result = np.concatenate([result[:-overlap], blended, curr[overlap:]])
         else:
             result = np.concatenate([result, curr])
-        if progress_callback and (i % progress_every == 0 or i == total_pairs):
-            progress_callback(i, total_pairs)
+        report(i, total_pairs)
     return result
+
+
+def _resolve_overlap_offsets(all_left, all_right, stereo, overlap, overlap_mode, locked_offset):
+    """Decide the per-pair overlap offsets to stitch all_left/all_right with.
+
+    Shared by extract_audio() and the CLI's main() so both entry points
+    resolve overlap identically instead of duplicating the mode dispatch.
+    Returns None when there's nothing to stitch (overlap disabled or fewer
+    than 2 frames) -- callers should concatenate the frames with no
+    trimming in that case.
+
+    "locked" mode with locked_offset > 0 reuses that single offset for
+    every pair via build_locked_offsets(). Otherwise ("auto", or "locked"
+    with locked_offset <= 0) computes one reel-wide offset automatically
+    via compute_robust_overlap_offset() -- using the mono mix for stereo,
+    so both channels stay sample-locked to each other -- and, if it found
+    nothing reliable to lock onto (returns 0), falls back to None (no
+    trimming) rather than guessing.
+    """
+    if overlap <= 0 or len(all_left) < 2:
+        return None
+
+    if overlap_mode == "locked" and locked_offset > 0:
+        return build_locked_offsets(all_left, locked_offset)
+
+    mono_for_offset = all_left if not stereo else [
+        (l + r) / 2.0 for l, r in zip(all_left, all_right)
+    ]
+    robust_offset = compute_robust_overlap_offset(mono_for_offset, overlap)
+    if robust_offset <= 0:
+        return None
+    return build_locked_offsets(all_left, robust_offset)
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +648,7 @@ def compute_overlap_waveform(corrected_a, corrected_b, overlap_frac, stereo=Fals
     """Compute the overlap alignment + preview waveform data between two
     corrected frame crops, for UI display.
 
-    Mirrors the real stitching math in stitch_with_overlap(): finds the
+    Mirrors the real stitching math in apply_overlap_offsets(): finds the
     offset that best aligns the tail of A with the head of B (using the
     mono mix when *stereo*, exactly like extract_audio() does so channels
     stay sample-synced), then builds the same cross-faded join preview.
@@ -1200,7 +1291,7 @@ def extract_audio(source, top, bottom, left, right,
                   dmin_headroom=0.2, binary_mask=False,
                   binary_lb=96, binary_ub=255, dmin_value=None,
                   integrate=False, bit_depth="int16", cancel_event=None,
-                  progress_every=20, channel_order="LR",
+                  progress_min_interval=0.1, channel_order="LR",
                   overlap_mode="auto", locked_offset=0):
     """Run the full extraction pipeline. Returns (sample_rate, sample_array).
 
@@ -1215,28 +1306,39 @@ def extract_audio(source, top, bottom, left, right,
     "int24", "int32", or "float32"; see _quantize_audio().
     *cancel_event*, if provided, is a threading.Event checked periodically
     during the run — ExtractionCancelled is raised as soon as it's set.
-    *progress_callback*, if provided, is called with (current, total) every
-    *progress_every* frames (and always on the last frame). Calling it on
-    every single frame sounds free — it's just a couple of attribute
-    writes — but it isn't free end-to-end: server.py's frame viewer treats
-    each distinct reported frame as a real position change and re-fetches
-    a freshly decoded/corrected preview image for it, so reporting too
-    finely turns every progress tick into extra concurrent image work
-    competing with this loop's own CPU-heavy decode/correct work. 20 is a
-    reasonable default; raise it for less UI churn, lower it (e.g. 1) for
-    maximum frame-viewer granularity if the caller can afford it.
+    *progress_callback*, if provided, is called with (current, total)
+    roughly every *progress_min_interval* seconds of wall-clock time
+    (always on the first and last frame) via ProgressThrottle, rather than
+    every N frames — a fixed frame count reports at a cadence tied to how
+    much work got done, not how much time passed, so it looks fine on
+    whatever hardware/frame-rate it was tuned against but drifts out of
+    sync the moment either changes (e.g. the thread-pool frame processing
+    below getting faster). Gating on elapsed time instead keeps the UI
+    getting roughly the same number of updates per second on any hardware:
+    server.py's frame viewer treats each distinct reported frame as a real
+    position change and re-fetches a freshly decoded/corrected preview
+    image for it, so this is also what keeps that re-fetch rate bounded
+    without needing to know the processing speed in advance. 0.1s is a
+    reasonable default; raise it for less UI/frame-viewer churn, lower it
+    for finer-grained feedback if the caller can afford it.
     *phase_callback*, if provided, is called with a string describing the
     current processing phase.
     *overlap_mode* selects how adjacent frames' audio is aligned before
-    stitching: "auto" (default) runs find_best_overlap() independently for
-    every pair, same as always. "locked" instead reuses one fixed
-    *locked_offset* (in samples, typically obtained from the Splice Preview
-    panel's "Lock this offset" button) for every pair via
-    build_locked_offsets() + apply_overlap_offsets() -- the AEO-Light-style
-    "Lock Height" alternative to per-pair search. *overlap* still caps the
-    per-pair clamp on *locked_offset* and still governs the auto-search
-    when *overlap_mode* is "auto". If *locked_offset* is 0 or negative,
-    "locked" mode falls back to the normal auto-search behavior.
+    stitching: "auto" (default) automatically computes one reel-wide offset
+    via compute_robust_overlap_offset() and reuses it for every pair --
+    the true physical overlap between consecutive frames is fixed by
+    scanner geometry (frame pitch), not by content, so one confidence-gated
+    offset applied everywhere is both more accurate and far less prone to
+    per-pair noise than re-searching independently for every pair. "locked"
+    instead reuses one manually-chosen *locked_offset* (in samples,
+    typically obtained from the Splice Preview panel's "Lock this offset"
+    button) for every pair. Both modes stitch via build_locked_offsets() +
+    apply_overlap_offsets() -- this is the AEO-Light-style "Lock Height"
+    approach, just automatic by default instead of requiring a manual pick.
+    *overlap* still caps the per-pair clamp on *locked_offset* and still
+    bounds the search window compute_robust_overlap_offset() uses. If
+    *locked_offset* is 0 or negative, "locked" mode falls back to "auto"'s
+    automatic computation.
     *start_frame* and *end_frame* allow processing a sub-range of frames
     (end_frame is inclusive; defaults to the last frame) — this is the
     picture frame range; it stays fixed regardless of *audio_offset*.
@@ -1259,6 +1361,12 @@ def extract_audio(source, top, bottom, left, right,
     trim to the shorter stream (e.g. ffmpeg's -shortest) — the picture
     track ending before the audio track does is expected.
     """
+    # Shared across the whole run so every phase's progress reports go
+    # through the same wall-clock-time throttle (see ProgressThrottle) --
+    # its cadence self-adjusts to actual processing speed instead of a
+    # fixed step count that only suited whatever hardware it was tuned on.
+    _report = ProgressThrottle(progress_callback, progress_min_interval)
+
     def _phase(msg, reset_progress=False):
         # reset_progress=True is for phases with no meaningful (current,
         # total) of their own (offset computation, resampling, filtering --
@@ -1267,8 +1375,11 @@ def extract_audio(source, top, bottom, left, right,
         # (0, 0) so callers with a progress UI (server.py's SSE stream)
         # switch from a percentage bar to a plain "working on it" indicator
         # instead of leaving the previous phase's numbers stale on screen.
-        if reset_progress and progress_callback:
-            progress_callback(0, 0)
+        # reset() forces this to fire immediately regardless of how
+        # recently the previous phase last reported.
+        if reset_progress:
+            _report.reset()
+            _report(0, 0)
         if phase_callback:
             phase_callback(msg)
 
@@ -1304,23 +1415,22 @@ def extract_audio(source, top, bottom, left, right,
     progress_lock = threading.Lock()
 
     def _mark_done():
-        # See progress_every in the docstring: batched (not called every
-        # frame) by default — reporting every frame makes server.py's
-        # frame viewer re-fetch a preview image on nearly every progress
-        # tick, which competes for CPU with this loop's own decode/correct
-        # work rather than being the free couple-of-attribute-writes it
-        # looks like in isolation. `completed` counts positions resolved
-        # so far (real or backfilled-as-missing) -- it still advances
-        # monotonically from 0 to `total` exactly once each regardless of
-        # source-vs-picture or decode/completion order (worker threads call
-        # this concurrently, hence the lock), which is all
-        # progress_callback relies on.
+        # See ProgressThrottle in the docstring: reports at a wall-clock
+        # cadence (not every frame) -- reporting every frame makes
+        # server.py's frame viewer re-fetch a preview image on nearly every
+        # progress tick, which competes for CPU with this loop's own
+        # decode/correct work rather than being the free couple-of-
+        # attribute-writes it looks like in isolation. `completed` counts
+        # positions resolved so far (real or backfilled-as-missing) -- it
+        # still advances monotonically from 0 to `total` exactly once each
+        # regardless of source-vs-picture or decode/completion order
+        # (worker threads call this concurrently, hence the lock), which is
+        # all progress_callback relies on.
         nonlocal completed
         with progress_lock:
             completed += 1
             current = completed
-        if progress_callback and (current % progress_every == 0 or current == total):
-            progress_callback(current, total)
+        _report(current, total)
 
     def _process_frame(position, img):
         # Called from worker threads (possibly concurrently, for distinct
@@ -1405,21 +1515,11 @@ def extract_audio(source, top, bottom, left, right,
             if stereo:
                 all_right[i] = silence.copy()
 
-    # Compute overlap offsets once (auto: mono-based search; locked: one
-    # manually-chosen offset reused for every pair) so both stereo channels
-    # -- and, in locked mode, mono too -- go through apply_overlap_offsets()
-    # identically instead of mono's usual per-pair stitch_with_overlap() search.
-    if overlap_mode == "locked" and locked_offset > 0 and len(all_left) > 1:
-        _phase("Applying locked overlap offset", reset_progress=True)
-        offsets = build_locked_offsets(all_left, locked_offset)
-    elif stereo and overlap > 0 and len(all_left) > 1:
-        _phase("Computing overlap offsets", reset_progress=True)
-        all_mono = [(l + r) / 2.0 for l, r in zip(all_left, all_right)]
-        offsets = compute_overlap_offsets(all_mono, overlap)
-    elif overlap > 0 and len(all_left) > 1:
-        offsets = None  # use standard stitch_with_overlap for mono
-    else:
-        offsets = None
+    # Compute one reel-wide overlap offset (auto: computed automatically;
+    # locked: manually chosen) so mono -- and both stereo channels -- go
+    # through apply_overlap_offsets() identically.
+    _phase("Computing overlap offset", reset_progress=True)
+    offsets = _resolve_overlap_offsets(all_left, all_right, stereo, overlap, overlap_mode, locked_offset)
 
     def _process_channel(all_samples, label, shared_offsets=None):
         if cancel_event is not None and cancel_event.is_set():
@@ -1432,17 +1532,13 @@ def extract_audio(source, top, bottom, left, right,
         # 0% immediately instead of the previous phase's stale 100% until
         # the first pair reports in.
         _phase(f"Stitching {label}")
-        if progress_callback and len(all_samples) > 1:
-            progress_callback(0, len(all_samples) - 1)
+        if len(all_samples) > 1:
+            _report.reset()
+            _report(0, len(all_samples) - 1)
         if shared_offsets is not None:
             raw_signal = apply_overlap_offsets(
                 all_samples, shared_offsets,
-                progress_callback=progress_callback, progress_every=progress_every,
-            )
-        elif overlap > 0 and len(all_samples) > 1:
-            raw_signal = stitch_with_overlap(
-                all_samples, overlap,
-                progress_callback=progress_callback, progress_every=progress_every,
+                progress_callback=progress_callback, min_interval=progress_min_interval,
             )
         else:
             raw_signal = np.concatenate(all_samples)
@@ -1711,9 +1807,12 @@ def main():
             all_samples[i] = silence.copy()
 
     # Stitch frames with overlap detection and cross-fade
-    if args.overlap > 0:
-        print(f"Stitching frames with up to {args.overlap*100:.0f}% overlap search...")
-        raw_signal = stitch_with_overlap(all_samples, args.overlap)
+    offsets = _resolve_overlap_offsets(
+        all_samples, None, False, args.overlap, args.overlap_mode, args.locked_offset
+    )
+    if offsets is not None:
+        print(f"Stitching frames with overlap offset (mode={args.overlap_mode})...")
+        raw_signal = apply_overlap_offsets(all_samples, offsets)
     else:
         raw_signal = np.concatenate(all_samples)
     native_rate = len(all_samples[0]) * args.fps  # use single-frame length for native rate

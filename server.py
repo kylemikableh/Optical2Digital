@@ -34,6 +34,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import wave
 from typing import Literal
 
@@ -44,6 +46,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import KylesOpticalDecoder as decoder
+
+try:
+    # Generated at build time by packaging/optical2digital.spec from the
+    # APP_VERSION env var (itself derived from the release git tag — see
+    # .github/workflows/release.yml). Not present for dev runs (`python
+    # server.py` / `python packaging/launcher.py` outside of PyInstaller).
+    # This is the single source of truth for the running app's version —
+    # packaging/launcher.py imports APP_VERSION from here rather than
+    # resolving it a second time itself.
+    from app_version import APP_VERSION
+except ImportError:
+    APP_VERSION = "0.0.0-dev"
 
 app = FastAPI(title="Optical2Digital")
 
@@ -97,6 +111,80 @@ _export_video_job = {
     "video_bytes": None,
     "stats": None,
 }
+
+
+# ---------------------------------------------------------------------------
+# Update check — GitHub Releases
+# ---------------------------------------------------------------------------
+
+GITHUB_REPO = "kylemikableh/Optical2Digital"
+
+
+def _parse_version_tuple(version_str):
+    """Parse "X.Y.Z[-suffix]" (our release tags, e.g. "0.6.2" or
+    "0.6.2-beta" with the leading "v" already stripped) into a tuple usable
+    for comparison: (major, minor, patch, is_stable). *is_stable* is 1 when
+    there's no "-suffix" and 0 when there is, so "1.2.0" sorts higher than
+    "1.2.0-beta" at the same numeric core — matching normal
+    release-vs-prerelease expectations without pulling in a semver library.
+
+    Raises ValueError if the numeric core can't be parsed (caller decides
+    how to handle an unrecognized version string).
+    """
+    core, _, suffix = version_str.partition("-")
+    parts = core.split(".")
+    if not (1 <= len(parts) <= 3) or not all(p.isdigit() for p in parts):
+        raise ValueError(f"Unrecognized version string: {version_str!r}")
+    nums = tuple(int(p) for p in parts)
+    nums = nums + (0,) * (3 - len(nums))
+    return nums + (0 if suffix else 1,)
+
+
+def _is_newer_version(latest, current):
+    """True if *latest* is a newer version string than *current*. Any
+    parse failure (unexpected tag format) is treated as "not newer" rather
+    than raising, so a malformed/unusual release tag never breaks the
+    check for users -- it just silently skips notifying them."""
+    try:
+        return _parse_version_tuple(latest) > _parse_version_tuple(current)
+    except ValueError:
+        return False
+
+
+@app.get("/api/update-check")
+def check_for_update():
+    """Best-effort check against GitHub's latest release. Never raises --
+    any failure (offline, rate-limited, GitHub down, unexpected response
+    shape) degrades to update_available=False with an `error` message,
+    since this must never block or break the app itself.
+    """
+    result = {
+        "current_version": APP_VERSION,
+        "latest_version": None,
+        "latest_url": f"https://github.com/{GITHUB_REPO}/releases/latest",
+        "update_available": False,
+        "error": None,
+    }
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Optical2Digital-update-check",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.load(resp)
+        tag = data.get("tag_name", "")
+        latest_version = tag[1:] if tag.startswith("v") else tag
+        result["latest_version"] = latest_version
+        result["latest_url"] = data.get("html_url") or result["latest_url"]
+        result["update_available"] = _is_newer_version(latest_version, APP_VERSION)
+    except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as e:
+        result["error"] = str(e)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +622,11 @@ def extract_progress():
             yield f"data: {json.dumps(data)}\n\n"
             if _extract_job["done"]:
                 break
-            time.sleep(0.3)
+            # Matches KylesOpticalDecoder.ProgressThrottle's default
+            # min_interval (0.1s) -- polling slower than the backend
+            # actually reports would silently turn this into the
+            # bottleneck for how often the browser sees an update.
+            time.sleep(0.1)
 
     return StreamingResponse(
         event_stream(),
@@ -746,7 +838,11 @@ def export_video_progress():
             yield f"data: {json.dumps(data)}\n\n"
             if _export_video_job["done"]:
                 break
-            time.sleep(0.3)
+            # Matches KylesOpticalDecoder.ProgressThrottle's default
+            # min_interval (0.1s) -- polling slower than the backend
+            # actually reports would silently turn this into the
+            # bottleneck for how often the browser sees an update.
+            time.sleep(0.1)
 
     return StreamingResponse(
         event_stream(),
