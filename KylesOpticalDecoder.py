@@ -73,12 +73,24 @@ def parse_args():
         help="Pixel coordinates to crop the soundtrack region: top bottom left right",
     )
     parser.add_argument(
-        "--fps", type=float, default=24.0,
-        help="Frame rate of the film",
+        "--fps", type=float, default=None,
+        help="Frame rate of the film (default: the video's own frame rate, or 24 for image sequences)",
     )
     parser.add_argument(
         "--sample-rate", type=int, default=48000,
         help="Output WAV sample rate in Hz",
+    )
+    parser.add_argument(
+        "--bit-depth", choices=_BIT_DEPTHS, default="int16",
+        help="Output WAV sample format",
+    )
+    parser.add_argument(
+        "--start-frame", type=int, default=0,
+        help="First picture frame to process",
+    )
+    parser.add_argument(
+        "--end-frame", type=int, default=None,
+        help="Last picture frame to process, inclusive (default: the last frame)",
     )
     parser.add_argument(
         "--negative", action="store_true",
@@ -143,6 +155,20 @@ def parse_args():
             "Sound advance in frames: the soundtrack for picture frame N is printed "
             "this many frames earlier in the scan (frame N - offset). 21 is the typical "
             "default for optical film prints."
+        ),
+    )
+    parser.add_argument(
+        "--stereo", action="store_true",
+        help=(
+            "Extract a stereo (2-channel) track: the cropped soundtrack is split "
+            "down the middle, inner half = left channel, outer half = right"
+        ),
+    )
+    parser.add_argument(
+        "--channel-order", choices=["LR", "RL"], default="LR",
+        help=(
+            "Stereo only: LR keeps the inner half as the left channel; RL swaps "
+            "the channels, for scans whose track runs right-to-left"
         ),
     )
     parser.add_argument(
@@ -1292,7 +1318,7 @@ def extract_audio(source, top, bottom, left, right,
                   binary_lb=96, binary_ub=255, dmin_value=None,
                   integrate=False, bit_depth="int16", cancel_event=None,
                   progress_min_interval=0.1, channel_order="LR",
-                  overlap_mode="auto", locked_offset=0):
+                  overlap_mode="auto", locked_offset=0, dump_crops_dir=None):
     """Run the full extraction pipeline. Returns (sample_rate, sample_array).
 
     *source* is a FrameSource object (ImageSequenceSource or VideoSource).
@@ -1339,6 +1365,9 @@ def extract_audio(source, top, bottom, left, right,
     bounds the search window compute_robust_overlap_offset() uses. If
     *locked_offset* is 0 or negative, "locked" mode falls back to "auto"'s
     automatic computation.
+    *dump_crops_dir*, if given, receives each frame's cropped/corrected
+    soundtrack image as frame_NNNNNN.png (numbered by picture frame) for
+    debugging; the directory must already exist.
     *start_frame* and *end_frame* allow processing a sub-range of frames
     (end_frame is inclusive; defaults to the last frame) — this is the
     picture frame range; it stays fixed regardless of *audio_offset*.
@@ -1455,6 +1484,9 @@ def extract_audio(source, top, bottom, left, right,
             dmin_value=dmin_value,
             integrate=integrate,
         )
+        if dump_crops_dir:
+            dump_path = os.path.join(dump_crops_dir, f"frame_{indices[position]:06d}.png")
+            cv2.imwrite(dump_path, (corrected * 255).astype(np.uint8))
         if stereo:
             l_ch, r_ch = extract_stereo_scanline_audio(corrected)
             all_left[position] = l_ch
@@ -1637,14 +1669,20 @@ def _write_wav_int24(buf, sample_rate, samples):
     buf.write(data)
 
 
+def _write_wav(buf, sample_rate, samples, bit_depth):
+    """Write *samples* (as returned by extract_audio()) to the binary file
+    object *buf* in the WAV sample format matching *bit_depth*."""
+    if bit_depth == "int24":
+        _write_wav_int24(buf, sample_rate, samples)
+    else:
+        wavfile.write(buf, sample_rate, samples)
+
+
 def extract_audio_to_wav_bytes(source, bit_depth="int16", **kwargs):
     """Run extraction and return the WAV file as an in-memory bytes object."""
     sr, samples = extract_audio(source, bit_depth=bit_depth, **kwargs)
     buf = io.BytesIO()
-    if bit_depth == "int24":
-        _write_wav_int24(buf, sr, samples)
-    else:
-        wavfile.write(buf, sr, samples)
+    _write_wav(buf, sr, samples, bit_depth)
     buf.seek(0)
     return buf.read()
 
@@ -1663,18 +1701,22 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    num_frames = source.num_frames
     if source.fps is not None:
-        print(f"Video source: {num_frames} frames at {source.fps:.3f} fps")
-        if args.fps == 24.0:  # default — override with video fps
-            args.fps = source.fps
+        print(f"Video source: {source.num_frames} frames at {source.fps:.3f} fps")
     else:
-        print(f"Image sequence: {num_frames} frames")
+        print(f"Image sequence: {source.num_frames} frames")
+    if args.fps is None:
+        args.fps = source.fps if source.fps is not None else 24.0
+    print(f"Frame rate: {args.fps:.3f} fps")
 
     top, bottom, left, right = args.crop
     print(f"Crop region: top={top} bottom={bottom} left={left} right={right}")
     print(f"Soundtrack color mode: {args.soundtrack_color}")
     print(f"Audio offset: {args.audio_offset} frames")
+    if args.stereo:
+        print(f"Channels: stereo (order={args.channel_order})")
+    else:
+        print("Channels: mono")
     if args.integrate:
         print("Pixel value mode: Average Pixel Value (SVA integration)")
     else:
@@ -1691,164 +1733,53 @@ def main():
         os.makedirs(args.dump_crops, exist_ok=True)
         print(f"Dumping cropped images to '{args.dump_crops}/'")
 
-    # --- Process frames ---
-    # Extend past the last picture frame by audio_offset frames: the source
-    # frames at the very end of the scan hold real soundtrack data for
-    # picture positions beyond num_frames - 1 that were never scanned as
-    # picture -- see extract_audio()'s docstring for the full explanation.
-    indices = list(range(num_frames + max(args.audio_offset, 0)))
-    if args.reverse:
-        indices = indices[::-1]
-    total_indices = len(indices)
-    # See extract_audio()'s matching comment: source_indices is a constant
-    # shift of `indices`, so it's contiguous ascending/descending too.
-    # VideoSource frames are decoded in ascending source order below
-    # (regardless of args.reverse) and placed into their correct output
-    # position via position_by_source_idx.
-    source_indices = [frame_idx - args.audio_offset for frame_idx in indices]
+    # --- Run the same pipeline the GUI uses (server.py's /api/extract) ---
+    def _progress(current, total):
+        if total:
+            print(f"  {current}/{total}", file=sys.stderr)
 
-    all_samples = [None] * total_indices
-    missing_indices = []
-    completed = 0
-    progress_lock = threading.Lock()
-
-    def _mark_done():
-        nonlocal completed
-        with progress_lock:
-            completed += 1
-            current = completed
-        if current % 50 == 0 or current == total_indices:
-            print(f"  Processed {current}/{total_indices} frames", file=sys.stderr)
-
-    def _process_frame(position, img):
-        # May be called from worker threads (possibly concurrently, for
-        # distinct positions) by the thread pools below -- see the matching
-        # comment in extract_audio()'s _process_frame for why that's safe.
-        frame_idx = indices[position]
-        img_corrected = crop_and_correct(
-            img,
-            top,
-            bottom,
-            left,
-            right,
+    try:
+        sample_rate, samples = extract_audio(
+            source, top, bottom, left, right,
             rotate=args.rotate,
             negative=args.negative,
+            fps=args.fps,
+            sample_rate=args.sample_rate,
+            hpf=args.hpf,
+            lpf=args.lpf,
+            overlap=args.overlap,
+            overlap_mode=args.overlap_mode,
+            locked_offset=args.locked_offset,
+            audio_offset=args.audio_offset,
+            stereo=args.stereo,
+            channel_order=args.channel_order,
+            reverse=args.reverse,
+            start_frame=args.start_frame,
+            end_frame=args.end_frame,
             soundtrack_color=args.soundtrack_color,
             dmin_percentile=args.dmin_percentile,
             dmin_headroom=args.dmin_headroom,
+            dmin_value=args.dmin_value,
             binary_mask=args.binary_mask,
             binary_lb=args.binary_lb,
             binary_ub=args.binary_ub,
-            dmin_value=args.dmin_value,
             integrate=args.integrate,
+            bit_depth=args.bit_depth,
+            progress_callback=_progress,
+            phase_callback=lambda msg: print(f"{msg}...", file=sys.stderr),
+            progress_min_interval=2.0,
+            dump_crops_dir=args.dump_crops,
         )
-
-        # Dump cropped image if requested
-        if args.dump_crops:
-            dump_path = os.path.join(args.dump_crops, f"frame_{frame_idx:06d}.png")
-            cv2.imwrite(dump_path, (img_corrected * 255).astype(np.uint8))
-
-        # Extract audio: mean brightness per row → one sample per scanline
-        all_samples[position] = extract_scanline_audio(img_corrected)
-        _mark_done()
-
-    def _note_missing(position):
-        # No corresponding source frame for this picture frame's
-        # audio_offset-shifted soundtrack position -- most commonly
-        # because frame_idx - args.audio_offset is before the start of
-        # the scan. Backfilled with silence below (once a real chunk's
-        # length is known) rather than dropped: dropping would shrink
-        # the output track by audio_offset frames' worth of time and
-        # slide all audio earlier, silently undoing the offset instead
-        # of applying it.
-        print(f"  Note: no source frame at {source_indices[position]} "
-              f"(audio_offset={args.audio_offset}); using silence.", file=sys.stderr)
-        missing_indices.append(position)
-
-    num_workers = _default_pool_size()
-
-    if isinstance(source, VideoSource):
-        position_by_source_idx = {}
-        for position, s_idx in enumerate(source_indices):
-            if s_idx < 0 or s_idx >= source.num_frames:
-                _note_missing(position)
-                _mark_done()
-            else:
-                position_by_source_idx[s_idx] = position
-
-        processed = _run_video_frame_pool(
-            source, position_by_source_idx, _process_frame, None, num_workers
-        )
-        for s_idx, position in position_by_source_idx.items():
-            if position not in processed:
-                _note_missing(position)
-                _mark_done()
-    else:
-        def _load_one(position):
-            return source.load_frame(source_indices[position])
-
-        positions = list(range(total_indices))
-        processed = _run_sequence_frame_pool(
-            positions, _load_one, _process_frame, None, num_workers
-        )
-        for position in positions:
-            if position not in processed:
-                _note_missing(position)
-                _mark_done()
-
-    if len(missing_indices) == len(all_samples):
-        print("Error: no frames were successfully processed", file=sys.stderr)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if missing_indices:
-        template = next(chunk for chunk in all_samples if chunk is not None)
-        silence = np.zeros_like(template)
-        for i in missing_indices:
-            all_samples[i] = silence.copy()
-
-    # Stitch frames with overlap detection and cross-fade
-    offsets = _resolve_overlap_offsets(
-        all_samples, None, False, args.overlap, args.overlap_mode, args.locked_offset
-    )
-    if offsets is not None:
-        print(f"Stitching frames with overlap offset (mode={args.overlap_mode})...")
-        raw_signal = apply_overlap_offsets(all_samples, offsets)
-    else:
-        raw_signal = np.concatenate(all_samples)
-    native_rate = len(all_samples[0]) * args.fps  # use single-frame length for native rate
-    print(f"Raw signal: {len(raw_signal)} samples at native rate ~{native_rate:.0f} Hz")
-
-    # --- Resample to target sample rate ---
-    # Target length is anchored to the true elapsed time (frame count / fps),
-    # not to len(raw_signal): overlap-based stitching above removes
-    # genuinely duplicated (overscanned) content, which shortens raw_signal
-    # without changing how much real time these frames actually span.
-    # Deriving the target from raw_signal's length would shrink the output
-    # audio by however much overlap was removed.
-    target_num_samples = int(round(len(all_samples) * args.sample_rate / args.fps))
-    print(f"Resampling to {args.sample_rate} Hz ({target_num_samples} samples)...")
-    signal = resample(raw_signal, target_num_samples)
-
-    # --- Post-processing filters ---
-    # Low-pass filter (anti-aliasing / noise removal)
-    print(f"Applying low-pass filter at {args.lpf} Hz...")
-    signal = apply_lowpass(signal, args.lpf, args.sample_rate)
-
-    # High-pass filter (DC bias removal — the critical step)
-    print(f"Applying high-pass filter at {args.hpf} Hz...")
-    signal = apply_highpass(signal, args.hpf, args.sample_rate)
-
-    # --- Normalize to signed 16-bit range ---
-    peak = np.max(np.abs(signal))
-    if peak > 0:
-        signal = signal / peak  # normalize to [-1.0, +1.0]
-    signal_int16 = np.clip(signal * 32767, -32768, 32767).astype(np.int16)
-
     # --- Write WAV ---
-    wavfile.write(args.output, args.sample_rate, signal_int16)
-    duration = len(signal_int16) / args.sample_rate
-    print(f"Wrote {args.output}: {duration:.2f}s, {args.sample_rate} Hz, 16-bit mono")
-
+    with open(args.output, "wb") as f:
+        _write_wav(f, sample_rate, samples, args.bit_depth)
+    duration = len(samples) / sample_rate
+    channels_desc = "stereo" if args.stereo else "mono"
+    print(f"Wrote {args.output}: {duration:.2f}s, {sample_rate} Hz, {args.bit_depth} {channels_desc}")
 
 if __name__ == "__main__":
     main()
